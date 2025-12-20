@@ -399,10 +399,10 @@
                     <tr>
                         <th>#</th>
                         <th>Jugador</th>
-                        <th>Anterior</th>
-                        <th>Actual</th>
-                        <th>Ganados</th>
-                        <th>%</th>
+                        <th>Puntos Totales</th>
+                        <th>Ganados (Sesión)</th>
+                        <th>Déficit vs. Máximo</th>
+                        <th>Dist. al Líder</th>
                         <th>Estado</th>
                     </tr>
                 </thead>
@@ -552,19 +552,19 @@
             statsGrid.innerHTML = `
                 <div class="stat-card">
                     <div class="stat-value">${formatNumber(analisis.resumen.total_actual)}</div>
-                    <div class="stat-label">Puntos Totales Actuales</div>
+                    <div class="stat-label">Puntos Totales</div>
                 </div>
                 <div class="stat-card">
                     <div class="stat-value positive">+${formatNumber(analisis.resumen.total_ganado)}</div>
-                    <div class="stat-label">Puntos Ganados</div>
-                </div>
-                <div class="stat-card">
-                    <div class="stat-value">${formatNumber(analisis.resumen.promedio)}</div>
-                    <div class="stat-label">Promedio por Jugador</div>
+                    <div class="stat-label">Puntos Ganados (Total)</div>
                 </div>
                 <div class="stat-card">
                     <div class="stat-value">👑 ${analisis.lider ? analisis.lider[0] : 'N/A'}</div>
-                    <div class="stat-label">Líder Actual</div>
+                    <div class="stat-label">Líder General</div>
+                </div>
+                <div class="stat-card">
+                    <div class="stat-value">🏆 ${analisis.resumen.ganador_sesion || 'N/A'}</div>
+                    <div class="stat-label">Más Ganó Esta Sesión (+${formatNumber(analisis.resumen.max_ganado)})</div>
                 </div>
             `;
             
@@ -586,13 +586,15 @@
                 <tr>
                     <td>${row.rango}</td>
                     <td><strong>${row.jugador}</strong></td>
-                    <td>${formatNumber(row.anterior)}</td>
                     <td>${formatNumber(row.actual)}</td>
-                    <td class="${row.diferencia > 0 ? 'positive' : row.diferencia < 0 ? 'negative' : 'neutral'}">
-                        ${row.diferencia > 0 ? '+' : ''}${formatNumber(row.diferencia)}
+                    <td class="${row.ganado_sesion > 0 ? 'positive' : row.ganado_sesion < 0 ? 'negative' : 'neutral'}">
+                        ${row.ganado_sesion > 0 ? '+' : ''}${formatNumber(row.ganado_sesion)}
                     </td>
-                    <td class="${row.porcentaje > 0 ? 'positive' : 'neutral'}">
-                        ${row.porcentaje > 0 ? '+' : ''}${row.porcentaje}%
+                    <td class="${row.deficit_vs_maximo < 0 ? 'negative' : 'positive'}">
+                        ${formatNumber(row.deficit_vs_maximo)}
+                    </td>
+                    <td class="${row.distancia_lider > 0 ? 'negative' : 'positive'}">
+                        ${row.distancia_lider > 0 ? '-' : ''}${formatNumber(row.distancia_lider)}
                     </td>
                     <td>
                         <span class="badge ${row.estado === 'activo' ? 'badge-active' : 'badge-inactive'}">
