@@ -1,8 +1,0 @@
-[phases.setup]
-nixPkgs = ["tesseract4", "leptonica"]
-
-[phases.install]
-cmds = ["pip install -r requirements.txt"]
-
-[start]
-cmd = "gunicorn app_lite:app --bind 0.0.0.0:$PORT"
