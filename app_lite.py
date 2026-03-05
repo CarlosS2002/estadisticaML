@@ -70,65 +70,100 @@ def corregir_nombre(nombre):
 
 def extraer_datos_imagen(imagen_bytes):
     """
-    Extrae datos usando Tesseract (más ligero que EasyOCR)
+    Extrae solo los números de la imagen y los asigna a Pos1-Pos10.
+    No depende de detectar nombres, lo que lo hace mucho más fiable.
     """
-    if not OCR_DISPONIBLE:
-        return {'datos': {}, 'textos': [], 'exito': False, 'error': 'OCR no disponible'}
-    
     try:
         imagen = Image.open(BytesIO(imagen_bytes))
         if imagen.mode == 'RGBA':
             imagen = imagen.convert('RGB')
-        
+
         # Preprocesamiento
         width, height = imagen.size
-        imagen = imagen.resize((width * 2, height * 2), Image.Resampling.LANCZOS)
-        
+        imagen = imagen.resize((width * 3, height * 3), Image.Resampling.LANCZOS)
+
         enhancer = ImageEnhance.Contrast(imagen)
-        imagen = enhancer.enhance(2.0)
-        
-        # Convertir a escala de grises
-        imagen_gray = imagen.convert('L')
-        
-        # Binarizar
-        imagen_np = np.array(imagen_gray)
-        threshold = 100
-        imagen_np = np.where(imagen_np > threshold, 255, 0).astype(np.uint8)
-        imagen_bin = Image.fromarray(imagen_np)
-        
-        # OCR con Tesseract
-        texto = pytesseract.image_to_string(imagen_bin, config='--psm 6')
-        
-        lineas = texto.strip().split('\n')
-        textos_detectados = [l.strip() for l in lineas if l.strip()]
-        
-        print(f"📝 Textos: {textos_detectados}")
-        
-        # Parsear
+        imagen = enhancer.enhance(1.8)
+        enhancer = ImageEnhance.Sharpness(imagen)
+        imagen = enhancer.enhance(1.5)
+
+        todos_los_numeros = []
+
+        if OCR_DISPONIBLE:
+            # Intentar con pytesseract
+            try:
+                imagen_gray = imagen.convert('L')
+                imagen_np = np.array(imagen_gray)
+                imagen_np = np.where(imagen_np > 100, 255, 0).astype(np.uint8)
+                imagen_bin = Image.fromarray(imagen_np)
+
+                # Configuración que extrae dígitos más fácilmente
+                configs = [
+                    '--psm 6 -c tessedit_char_whitelist=0123456789',
+                    '--psm 11 -c tessedit_char_whitelist=0123456789',
+                    '--psm 6',
+                ]
+                texto_total = ''
+                for cfg in configs:
+                    try:
+                        texto_total += pytesseract.image_to_string(imagen_bin, config=cfg) + '\n'
+                    except Exception:
+                        pass
+
+                print(f"📝 Texto OCR raw: {texto_total[:300]}")
+
+                for num_str in re.findall(r'\d+', texto_total):
+                    if len(num_str) >= 6:
+                        n = int(num_str)
+                        if n >= 100000:
+                            todos_los_numeros.append(n)
+
+            except Exception as e:
+                print(f"⚠️ pytesseract falló: {e}")
+
+        # Si pytesseract no funcionó, intentar con datos de píxeles (fallback)
+        if not todos_los_numeros:
+            print("⚠️ OCR sin resultados, intentando método alternativo...")
+            # Guardar imagen temporalmente y releer con configuración diferente
+            from io import BytesIO as BIO
+            buf = BIO()
+            imagen.save(buf, format='PNG')
+            buf.seek(0)
+            if OCR_DISPONIBLE:
+                try:
+                    texto = pytesseract.image_to_string(
+                        Image.open(buf),
+                        config='--oem 3 --psm 4'
+                    )
+                    for num_str in re.findall(r'\d{6,}', texto):
+                        n = int(num_str)
+                        if n >= 100000:
+                            todos_los_numeros.append(n)
+                except Exception as e2:
+                    print(f"⚠️ Fallback OCR falló: {e2}")
+
+        # Eliminar duplicados manteniendo orden
+        vistos = set()
+        numeros_unicos = []
+        for n in todos_los_numeros:
+            if n not in vistos:
+                vistos.add(n)
+                numeros_unicos.append(n)
+
+        # Ordenar de mayor a menor (ranking) y tomar los 10 primeros
+        numeros_unicos.sort(reverse=True)
+
         datos = {}
-        jugador_actual = None
-        
-        for texto in textos_detectados:
-            texto_limpio = re.sub(r'^[\d]+[.\s\-:]*', '', texto).strip()
-            texto_limpio = re.sub(r'[?!.,;:]+$', '', texto_limpio).strip()
-            
-            # Solo número grande
-            solo_numero = texto.replace(' ', '').replace('.', '').replace(',', '')
-            if re.match(r'^[\d]+$', solo_numero) and len(solo_numero) >= 6:
-                puntos = int(solo_numero)
-                if jugador_actual and puntos > 100000:
-                    datos[jugador_actual] = puntos
-                    jugador_actual = None
-                continue
-            
-            # Nombre de jugador
-            if re.match(r'^[A-Za-z_][A-Za-z0-9_]*$', texto_limpio) and len(texto_limpio) > 2:
-                jugador_actual = corregir_nombre(texto_limpio)
-        
-        return {'datos': datos, 'textos': textos_detectados, 'exito': len(datos) > 0}
-        
+        for i, puntos in enumerate(numeros_unicos[:10], 1):
+            datos[f'Pos{i}'] = puntos
+
+        print(f"📊 Números encontrados: {numeros_unicos}")
+        print(f"✅ Datos: {datos}")
+
+        return {'datos': datos, 'textos': list(map(str, numeros_unicos)), 'exito': len(datos) > 0}
+
     except Exception as e:
-        print(f"Error OCR: {e}")
+        print(f"❌ Error extracción: {e}")
         return {'datos': {}, 'textos': [], 'exito': False, 'error': str(e)}
 
 
