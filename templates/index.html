@@ -390,7 +390,7 @@
             <h2 class="section-title">📊 Resumen General</h2>
             <div class="stats-grid" id="stats-grid"></div>
             
-            <h2 class="section-title">🏆 Top Jugadores Activos</h2>
+            <h2 class="section-title">🏆 Top Activos</h2>
             <div class="top-players" id="top-players"></div>
             
             <h2 class="section-title">📋 Tabla Comparativa</h2>
@@ -398,7 +398,7 @@
                 <thead>
                     <tr>
                         <th>#</th>
-                        <th>Jugador</th>
+                        <th>Posición</th>
                         <th>Puntos Totales</th>
                         <th>Ganados (Sesión)</th>
                         <th>Déficit vs. Máximo</th>
@@ -409,7 +409,7 @@
                 <tbody id="table-body"></tbody>
             </table>
             
-            <h2 class="section-title" id="inactive-title" style="display:none;">⏸️ Jugadores Sin Actividad</h2>
+            <h2 class="section-title" id="inactive-title" style="display:none;">⏸️ Sin Actividad</h2>
             <div id="inactive-list"></div>
         </div>
     </div>
@@ -560,11 +560,11 @@
                 </div>
                 <div class="stat-card">
                     <div class="stat-value">👑 ${analisis.lider ? analisis.lider[0] : 'N/A'}</div>
-                    <div class="stat-label">Líder General</div>
+                    <div class="stat-label">Líder (Más Puntos)</div>
                 </div>
                 <div class="stat-card">
                     <div class="stat-value">🏆 ${analisis.resumen.ganador_sesion || 'N/A'}</div>
-                    <div class="stat-label">Más Ganó Esta Sesión (+${formatNumber(analisis.resumen.max_ganado)})</div>
+                    <div class="stat-label">Más Ganó (+${formatNumber(analisis.resumen.max_ganado)})</div>
                 </div>
             `;
             

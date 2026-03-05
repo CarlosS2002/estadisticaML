@@ -37,8 +37,8 @@ datos_almacenados = {
 
 def extraer_datos_imagen(imagen_bytes):
     """
-    Extrae los datos de jugadores y puntos de una imagen
-    Versión mejorada con preprocesamiento de imagen
+    Extrae solo los puntos de una imagen y los asigna a posiciones 1-10
+    Simplificado para evitar errores de OCR con nombres
     """
     try:
         # Guardar imagen temporalmente
@@ -46,51 +46,28 @@ def extraer_datos_imagen(imagen_bytes):
         if imagen.mode == 'RGBA':
             imagen = imagen.convert('RGB')
         
-        # === PREPROCESAMIENTO PARA MEJORAR OCR ===
+        # === PREPROCESAMIENTO SIMPLE ===
         import numpy as np
-        from PIL import ImageEnhance, ImageFilter
+        from PIL import ImageEnhance
         
-        # 1. Aumentar tamaño (ayuda mucho con texto pequeño)
+        # 1. Aumentar tamaño 3x
         width, height = imagen.size
-        imagen = imagen.resize((width * 3, height * 3), Image.Resampling.LANCZOS)
+        imagen_grande = imagen.resize((width * 3, height * 3), Image.Resampling.LANCZOS)
         
         # 2. Aumentar contraste
-        enhancer = ImageEnhance.Contrast(imagen)
-        imagen = enhancer.enhance(2.0)
+        enhancer = ImageEnhance.Contrast(imagen_grande)
+        imagen_contraste = enhancer.enhance(1.8)
         
         # 3. Aumentar nitidez
-        enhancer = ImageEnhance.Sharpness(imagen)
-        imagen = enhancer.enhance(2.0)
+        enhancer = ImageEnhance.Sharpness(imagen_contraste)
+        imagen_nitida = enhancer.enhance(1.5)
         
-        # 4. Convertir a escala de grises y aumentar brillo del texto
-        imagen_np = np.array(imagen)
+        # Guardar para OCR
+        temp_path = "temp_upload_color.png"
+        imagen_nitida.save(temp_path)
         
-        # Detectar texto amarillo/blanco (común en juegos)
-        # Crear máscara para colores claros
-        gray = np.mean(imagen_np, axis=2)
-        
-        # Binarizar: texto claro sobre fondo oscuro
-        threshold = 100
-        binary = np.where(gray > threshold, 255, 0).astype(np.uint8)
-        
-        # Convertir de nuevo a imagen PIL
-        imagen_procesada = Image.fromarray(binary)
-        
-        temp_path = "temp_upload.png"
-        imagen_procesada.save(temp_path)
-        
-        # También guardar versión original mejorada por si acaso
-        temp_path_original = "temp_upload_color.png"
-        imagen.save(temp_path_original)
-        
-        # OCR en imagen binarizada
+        # OCR
         resultados = reader.readtext(temp_path, paragraph=False, detail=1)
-        
-        # Si no detectó suficiente, intentar con la versión a color
-        if len(resultados) < 10:
-            resultados2 = reader.readtext(temp_path_original, paragraph=False, detail=1)
-            if len(resultados2) > len(resultados):
-                resultados = resultados2
         
         textos_detectados = []
         for (bbox, texto, prob) in resultados:
@@ -98,114 +75,33 @@ def extraer_datos_imagen(imagen_bytes):
         
         print(f"📝 Textos detectados ({len(textos_detectados)}): {textos_detectados}")
         
-        # Parsear datos
-        datos = {}
-        
-        # Correcciones de nombres comunes (OCR suele confundir caracteres)
-        correcciones = {
-            'morningstar': 'MorningStar7',
-            'morningstar7': 'MorningStar7',
-            'morningstarz': 'MorningStar7',
-            'morningstar?': 'MorningStar7',
-            'morning5tar7': 'MorningStar7',
-            'morningstarj': 'MorningStar7',
-            'carloqwert': 'carloquert',
-            'carloquert': 'carloquert',
-            'carl0quert': 'carloquert',
-            'besttoxico': 'BestToxico',
-            'bestt0xico': 'BestToxico',
-            'nighteye': '_Nighteye',
-            '_nighteye': '_Nighteye',
-            'nighteye_': '_Nighteye',
-            'getrix': 'Getrix',
-            '6etrix': 'Getrix',
-            'minic_efe': 'MiniC_EFE',
-            'minicefe': 'MiniC_EFE',
-            'minic_efe': 'MiniC_EFE',
-            'minlc_efe': 'MiniC_EFE',
-            'milena00': 'Milena00',
-            'milena0o': 'Milena00',
-            'milenao0': 'Milena00',
-            'milenaoo': 'Milena00',
-            'mi1ena00': 'Milena00',
-            'ilucia_': 'Ilucia_',
-            'ilucia': 'Ilucia_',
-            '1lucia_': 'Ilucia_',
-            'ilucla_': 'Ilucia_',
-            'athaoblen55': 'AthaOblen55',
-            'athaoblenss': 'AthaOblen55',
-            'athaoble55': 'AthaOblen55',
-            'athaoblen5s': 'AthaOblen55',
-            'atha0blen55': 'AthaOblen55',
-            'quark': 'Quark',
-            '0uark': 'Quark',
-        }
-        
-        def corregir_nombre(nombre):
-            nombre_lower = nombre.lower().replace(' ', '')
-            # Buscar coincidencia exacta primero
-            if nombre_lower in correcciones:
-                return correcciones[nombre_lower]
-            # Buscar coincidencia parcial
-            for key, value in correcciones.items():
-                if key in nombre_lower or nombre_lower in key:
-                    return value
-                # Similitud básica (al menos 70% de caracteres coinciden)
-                if len(key) > 3 and len(nombre_lower) > 3:
-                    matches = sum(1 for a, b in zip(key, nombre_lower) if a == b)
-                    if matches / max(len(key), len(nombre_lower)) > 0.7:
-                        return value
-            return nombre
-        
-        # === MÉTODO MEJORADO DE PARSING ===
-        # Combinar textos cercanos que podrían ser nombre + número
-        jugador_actual = None
+        # Extraer SOLO números grandes (puntos) - ordenados por aparición
         todos_los_numeros = []
-        todos_los_nombres = []
         
         for texto in textos_detectados:
-            texto_original = texto.strip()
-            texto = texto_original
+            # Limpiar caracteres que el OCR confunde con números
+            texto_limpio = texto.replace('O', '0').replace('o', '0').replace('I', '1').replace('l', '1')
             
-            # Limpiar número de rango al inicio (1. 2. etc)
-            texto_limpio = re.sub(r'^[\d]+[.\s\-:]*', '', texto).strip()
+            # Buscar secuencias de dígitos en el texto
+            numeros_encontrados = re.findall(r'\d+', texto_limpio)
             
-            # Eliminar caracteres especiales al final
-            texto_limpio = re.sub(r'[?!.,;:]+$', '', texto_limpio).strip()
-            
-            # Extraer números del texto (pueden estar pegados)
-            numeros_en_texto = re.findall(r'\d{6,}', texto.replace(' ', ''))
-            if numeros_en_texto:
-                for num_str in numeros_en_texto:
-                    todos_los_numeros.append(int(num_str))
-            
-            # ¿Es solo un número grande?
-            solo_numero = texto.replace(' ', '').replace('.', '').replace(',', '')
-            if re.match(r'^[\d]+$', solo_numero) and len(solo_numero) >= 6:
-                puntos = int(solo_numero)
-                if jugador_actual and puntos > 100000:
-                    datos[jugador_actual] = puntos
-                    jugador_actual = None
-                continue
-            
-            # ¿Es nombre de jugador?
-            if re.match(r'^[A-Za-z_][A-Za-z0-9_]*$', texto_limpio) and len(texto_limpio) > 2:
-                jugador_actual = corregir_nombre(texto_limpio)
-                todos_los_nombres.append(jugador_actual)
+            for num_str in numeros_encontrados:
+                if len(num_str) >= 6:  # Al menos 6 dígitos
+                    puntos = int(num_str)
+                    if puntos >= 100000:  # Puntos válidos de minería (>= para incluir 100000)
+                        todos_los_numeros.append(puntos)
+                        print(f"  ✓ Encontrado: {texto} -> {puntos}")
         
-        # Si no se encontraron suficientes datos, intentar emparejar nombres con números por posición
-        if len(datos) < 5 and len(todos_los_nombres) >= 5:
-            print(f"⚠️ Intentando emparejar por posición: {len(todos_los_nombres)} nombres, {len(todos_los_numeros)} números")
-            # Los números suelen venir después de los nombres
-            for i, nombre in enumerate(todos_los_nombres):
-                if i < len(todos_los_numeros):
-                    datos[nombre] = todos_los_numeros[i]
+        # Asignar a posiciones 1-10
+        datos = {}
+        for i, puntos in enumerate(todos_los_numeros[:10], 1):
+            datos[f"Pos{i}"] = puntos
         
         # Limpiar archivos temporales
-        for temp in ["temp_upload.png", "temp_upload_color.png"]:
-            if os.path.exists(temp):
-                os.remove(temp)
+        if os.path.exists(temp_path):
+            os.remove(temp_path)
         
+        print(f"📊 Números encontrados: {len(todos_los_numeros)}")
         print(f"✅ Datos extraídos: {datos}")
         
         return {
@@ -215,6 +111,7 @@ def extraer_datos_imagen(imagen_bytes):
         }
         
     except Exception as e:
+        print(f"❌ Error: {e}")
         return {
             'datos': {},
             'textos': [],
@@ -780,7 +677,7 @@ HTML_TEMPLATE = '''
             <h2 class="section-title">📊 Resumen General</h2>
             <div class="stats-grid" id="stats-grid"></div>
             
-            <h2 class="section-title">🏆 Top Jugadores Activos</h2>
+            <h2 class="section-title">🏆 Top Activos</h2>
             <div class="top-players" id="top-players"></div>
             
             <h2 class="section-title">📋 Tabla Comparativa</h2>
@@ -788,7 +685,7 @@ HTML_TEMPLATE = '''
                 <thead>
                     <tr>
                         <th>#</th>
-                        <th>Jugador</th>
+                        <th>Posición</th>
                         <th>Puntos Totales</th>
                         <th>Ganados (Sesión)</th>
                         <th>Déficit vs. Máximo</th>
@@ -799,7 +696,7 @@ HTML_TEMPLATE = '''
                 <tbody id="table-body"></tbody>
             </table>
             
-            <h2 class="section-title" id="inactive-title" style="display:none;">⏸️ Jugadores Sin Actividad</h2>
+            <h2 class="section-title" id="inactive-title" style="display:none;">⏸️ Sin Actividad</h2>
             <div id="inactive-list"></div>
         </div>
     </div>
@@ -950,11 +847,11 @@ HTML_TEMPLATE = '''
                 </div>
                 <div class="stat-card">
                     <div class="stat-value">👑 ${analisis.lider ? analisis.lider[0] : 'N/A'}</div>
-                    <div class="stat-label">Líder General</div>
+                    <div class="stat-label">Líder (Más Puntos)</div>
                 </div>
                 <div class="stat-card">
                     <div class="stat-value">🏆 ${analisis.resumen.ganador_sesion || 'N/A'}</div>
-                    <div class="stat-label">Más Ganó Esta Sesión (+${formatNumber(analisis.resumen.max_ganado)})</div>
+                    <div class="stat-label">Más Ganó (+${formatNumber(analisis.resumen.max_ganado)})</div>
                 </div>
             `;
             
