@@ -23,6 +23,14 @@ datos_almacenados = {
 print("✅ Tesseract OCR listo (versión ligera)")
 
 
+def _limpiar_numero(numero_texto):
+    """Convierte valores OCR con separadores a entero seguro."""
+    solo_digitos = re.sub(r'\D', '', numero_texto)
+    if not solo_digitos:
+        return None
+    return int(solo_digitos)
+
+
 def extraer_datos_imagen(imagen_bytes):
     """
     Extrae puntos usando Tesseract (más ligero que EasyOCR)
@@ -43,25 +51,49 @@ def extraer_datos_imagen(imagen_bytes):
         enhancer = ImageEnhance.Sharpness(imagen)
         imagen = enhancer.enhance(1.8)
         
-        # OCR con Tesseract
-        texto = pytesseract.image_to_string(imagen, config='--psm 6 -c tessedit_char_whitelist=0123456789,')
+        # OCR con texto completo para separar mejor rango y puntaje por línea
+        texto = pytesseract.image_to_string(imagen, config='--psm 6')
         
         print(f"📝 Texto detectado: {texto[:200]}...")
         
-        # Extraer números >= 100000
-        todos_los_numeros = []
+        # Extraer por línea: "rango ... puntaje"
+        datos_por_rango = {}
+        candidatos_sin_rango = []
+
         for linea in texto.split('\n'):
-            numeros = re.findall(r'\d{6,}', linea)
-            for num_str in numeros:
-                puntos = int(num_str)
-                if puntos >= 100000:
-                    todos_los_numeros.append(puntos)
-                    print(f"  ✓ Encontrado: {puntos}")
-        
-        # Asignar a posiciones
+            linea = linea.strip()
+            if not linea:
+                continue
+
+            # Caso ideal: 1. nombre - 45,009,026
+            match = re.search(r'^\s*(\d{1,2})\D+.*?(\d[\d\.,]{5,})\s*$', linea)
+            if match:
+                rango = int(match.group(1))
+                puntos = _limpiar_numero(match.group(2))
+                if puntos and puntos >= 100000 and 1 <= rango <= 10:
+                    datos_por_rango[rango] = puntos
+                    print(f"  ✓ Rango {rango}: {puntos}")
+                    continue
+
+            # Fallback: tomar el último número largo de la línea (suele ser el puntaje)
+            numeros = re.findall(r'\d[\d\.,]{5,}', linea)
+            if numeros:
+                puntos = _limpiar_numero(numeros[-1])
+                if puntos and puntos >= 100000:
+                    candidatos_sin_rango.append(puntos)
+                    print(f"  ✓ Puntaje fallback: {puntos}")
+
+        # Construir datos finales priorizando los rangos detectados
         datos = {}
-        for i, puntos in enumerate(todos_los_numeros[:10], 1):
-            datos[f"Pos{i}"] = puntos
+        for rango in sorted(datos_por_rango.keys()):
+            datos[f"Pos{rango}"] = datos_por_rango[rango]
+
+        # Completar posiciones faltantes con candidatos fallback
+        pos_libres = [i for i in range(1, 11) if f"Pos{i}" not in datos]
+        for i, puntos in enumerate(candidatos_sin_rango):
+            if i >= len(pos_libres):
+                break
+            datos[f"Pos{pos_libres[i]}"] = puntos
         
         print(f"✅ Datos extraídos: {len(datos)} posiciones")
         
