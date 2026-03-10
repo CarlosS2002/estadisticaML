@@ -3,7 +3,7 @@ Analizador de Puntos de Minería - Versión Web
 Sube imágenes y obtén análisis visual comparativo
 """
 
-from flask import Flask, render_template, request, jsonify, session
+from flask import Flask, render_template, request, jsonify
 import re
 import os
 from io import BytesIO
@@ -51,6 +51,47 @@ datos_almacenados = {
 }
 
 
+def _corregir_puntaje_con_rango(puntaje, rango):
+    """Corrige cuando el OCR pega el número de rango al puntaje (ej: 536897354 -> 36897354)."""
+    texto = str(puntaje)
+    
+    def _es_plausible(val_txt):
+        if not val_txt or not val_txt.isdigit():
+            return False
+        return len(val_txt) in (7, 8) and 1_000_000 <= int(val_txt) <= 99_999_999
+    
+    # Si ya es plausible (7-8 dígitos), no tocar
+    if _es_plausible(texto):
+        return puntaje
+    
+    candidatos = []
+    
+    # Si tenemos rango, intentar quitar ese prefijo
+    if rango is not None:
+        rango_txt = str(rango)
+        if texto.startswith(rango_txt):
+            candidatos.append(texto[len(rango_txt):])
+    
+    # Recortar 1 o 2 dígitos de prefijo espurio
+    if len(texto) >= 9:
+        candidatos.append(texto[1:])
+    if len(texto) >= 10:
+        candidatos.append(texto[2:])
+    
+    for cand in candidatos:
+        if _es_plausible(cand):
+            return int(cand)
+    
+    # Último recurso: tomar sufijo de 8 o 7 dígitos
+    if len(texto) > 8:
+        for n in (8, 7):
+            suf = texto[-n:]
+            if _es_plausible(suf):
+                return int(suf)
+    
+    return puntaje
+
+
 def extraer_datos_imagen(imagen_bytes):
     """
     Extrae solo los puntos de una imagen y los asigna a posiciones 1-10
@@ -70,30 +111,33 @@ def extraer_datos_imagen(imagen_bytes):
         if imagen.mode == 'RGBA':
             imagen = imagen.convert('RGB')
         
-        # === PREPROCESAMIENTO SIMPLE ===
-        import numpy as np
+        # === PREPROCESAMIENTO MEJORADO PARA FUENTES PIXEL ===
         from PIL import ImageEnhance
         
-        # 1. Aumentar tamaño solo si la imagen es pequeña
+        # 1. Escalar imagen para mejorar lectura de fuentes pixel
         width, height = imagen.size
-        if width < 600:
-            imagen_grande = imagen.resize((min(width * 2, 800), min(height * 2, 800)), Image.Resampling.LANCZOS)
+        if width < 900:
+            scale = max(3, 900 // width)
+            imagen_grande = imagen.resize(
+                (min(width * scale, 1800), min(height * scale, 1800)),
+                Image.Resampling.LANCZOS
+            )
         else:
             imagen_grande = imagen
         
         # 2. Aumentar contraste
         enhancer = ImageEnhance.Contrast(imagen_grande)
-        imagen_contraste = enhancer.enhance(1.8)
+        imagen_contraste = enhancer.enhance(2.0)
         
         # 3. Aumentar nitidez
         enhancer = ImageEnhance.Sharpness(imagen_contraste)
-        imagen_nitida = enhancer.enhance(1.5)
+        imagen_nitida = enhancer.enhance(1.8)
         
         # Guardar para OCR
         temp_path = "temp_upload_color.png"
         imagen_nitida.save(temp_path)
         
-        # OCR
+        # OCR con detalle de posición (bbox)
         resultados = reader.readtext(temp_path, paragraph=False, detail=1)
         
         textos_detectados = []
@@ -102,26 +146,64 @@ def extraer_datos_imagen(imagen_bytes):
         
         print(f"📝 Textos detectados ({len(textos_detectados)}): {textos_detectados}")
         
-        # Extraer SOLO números grandes (puntos) - ordenados por aparición
+        # === EXTRACCIÓN INTELIGENTE DE PUNTAJES ===
         todos_los_numeros = []
         
-        for texto in textos_detectados:
-            # Limpiar caracteres que el OCR confunde con números
-            texto_limpio = texto.replace('O', '0').replace('o', '0').replace('I', '1').replace('l', '1')
-            
-            # Buscar secuencias de dígitos en el texto
-            numeros_encontrados = re.findall(r'\d+', texto_limpio)
-            
-            for num_str in numeros_encontrados:
-                if len(num_str) >= 6:  # Al menos 6 dígitos
-                    puntos = int(num_str)
-                    if puntos >= 100000:  # Puntos válidos de minería (>= para incluir 100000)
+        # Paso 1: Intentar parsear líneas con formato "rango. nombre - puntaje"
+        texto_completo = "\n".join(textos_detectados)
+        lineas_parseadas = re.findall(
+            r'(\d{1,2})\s*[.\)]\s*\w+.*?[-–—]\s*(\d[\d\.,]{5,})',
+            texto_completo
+        )
+        
+        if lineas_parseadas:
+            print("📋 Formato estructurado detectado")
+            for rango_str, puntaje_str in lineas_parseadas:
+                solo_digitos = re.sub(r'\D', '', puntaje_str)
+                if solo_digitos and len(solo_digitos) >= 7:
+                    puntos = int(solo_digitos)
+                    puntos = _corregir_puntaje_con_rango(puntos, int(rango_str))
+                    if 1_000_000 <= puntos <= 99_999_999:
                         todos_los_numeros.append(puntos)
-                        print(f"  ✓ Encontrado: {texto} -> {puntos}")
+                        print(f"  ✓ Línea {rango_str}: {puntaje_str} -> {puntos}")
+        
+        # Paso 2: Fallback - extraer números individuales de cada texto OCR
+        if len(todos_los_numeros) < 3:
+            print("🔄 Fallback: extracción por tokens individuales")
+            todos_los_numeros = []
+            for texto in textos_detectados:
+                # Solo aplicar correcciones de caracteres a tokens que
+                # ya parecen numéricos (evitar contaminar nombres)
+                if re.search(r'\d{5,}', texto):
+                    texto_limpio = texto.replace('O', '0').replace('o', '0').replace('I', '1').replace('l', '1')
+                else:
+                    texto_limpio = texto
+                
+                numeros_encontrados = re.findall(r'\d[\d\.,]*\d', texto_limpio)
+                
+                for num_str in numeros_encontrados:
+                    solo_digitos = re.sub(r'\D', '', num_str)
+                    if len(solo_digitos) >= 7:
+                        puntos = int(solo_digitos)
+                        puntos = _corregir_puntaje_con_rango(puntos, None)
+                        if 1_000_000 <= puntos <= 99_999_999:
+                            todos_los_numeros.append(puntos)
+                            print(f"  ✓ Encontrado: {texto} -> {puntos}")
+        
+        # Eliminar duplicados conservando orden
+        numeros_unicos = []
+        vistos = set()
+        for n in todos_los_numeros:
+            if n not in vistos:
+                vistos.add(n)
+                numeros_unicos.append(n)
+        
+        # Ordenar por valor descendente (ranking natural)
+        numeros_unicos.sort(reverse=True)
         
         # Asignar a posiciones 1-10
         datos = {}
-        for i, puntos in enumerate(todos_los_numeros[:10], 1):
+        for i, puntos in enumerate(numeros_unicos[:10], 1):
             datos[f"Pos{i}"] = puntos
         
         # Limpiar archivos temporales
