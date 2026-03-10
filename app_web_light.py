@@ -31,6 +31,25 @@ def _limpiar_numero(numero_texto):
     return int(solo_digitos)
 
 
+def _corregir_puntaje_pegado_con_rango(puntaje, rango):
+    """Corrige casos OCR donde junta rango+puntaje (ej: 5 + 36897354 => 536897354)."""
+    if rango is None:
+        return puntaje
+
+    texto = str(puntaje)
+    rango_txt = str(rango)
+
+    # Si empieza con el rango y queda un puntaje valido de 7-8 digitos, usar el recorte.
+    if len(texto) >= 8 and texto.startswith(rango_txt):
+        recortado = texto[len(rango_txt):]
+        if len(recortado) in (7, 8):
+            valor = int(recortado)
+            if 100000 <= valor <= 99999999:
+                return valor
+
+    return puntaje
+
+
 def extraer_datos_imagen(imagen_bytes):
     """
     Extrae puntos usando Tesseract (más ligero que EasyOCR)
@@ -76,8 +95,7 @@ def extraer_datos_imagen(imagen_bytes):
 
             lineas[key]['tokens'].append((data['left'][i], txt, conf))
 
-        datos_por_rango = {}
-        candidatos_sin_rango = []
+        filas_detectadas = []
 
         for _, linea_info in sorted(lineas.items(), key=lambda item: item[1]['top']):
             tokens = sorted(linea_info['tokens'], key=lambda x: x[0])
@@ -122,15 +140,17 @@ def extraer_datos_imagen(imagen_bytes):
             if puntaje_candidato < 100000 or puntaje_candidato > 999999999:
                 continue
 
-            if rango is not None and 1 <= rango <= 10:
-                datos_por_rango[rango] = puntaje_candidato
-                print(f"  ✓ Rango {rango}: {puntaje_candidato}")
-            else:
-                candidatos_sin_rango.append(puntaje_candidato)
-                print(f"  ✓ Puntaje fallback: {puntaje_candidato}")
+            puntaje_candidato = _corregir_puntaje_pegado_con_rango(puntaje_candidato, rango)
+
+            filas_detectadas.append({
+                'top': linea_info['top'],
+                'rango_ocr': rango,
+                'puntaje': puntaje_candidato
+            })
+            print(f"  ✓ Fila top={linea_info['top']} rangoOCR={rango} puntaje={puntaje_candidato}")
 
         # Fallback extra si image_to_data no detecta suficiente
-        if len(datos_por_rango) < 3:
+        if len(filas_detectadas) < 3:
             texto = pytesseract.image_to_string(imagen, config='--psm 6')
             print(f"📝 Fallback texto: {texto[:200]}...")
             for linea in texto.split('\n'):
@@ -142,21 +162,25 @@ def extraer_datos_imagen(imagen_bytes):
                     continue
                 rango = int(match.group(1))
                 puntos = _limpiar_numero(match.group(2))
-                if puntos and 100000 <= puntos <= 999999999 and 1 <= rango <= 10 and rango not in datos_por_rango:
-                    datos_por_rango[rango] = puntos
-                    print(f"  ✓ Fallback rango {rango}: {puntos}")
+                if puntos and 100000 <= puntos <= 999999999 and 1 <= rango <= 10:
+                    puntos = _corregir_puntaje_pegado_con_rango(puntos, rango)
+                    filas_detectadas.append({'top': 100000 + rango, 'rango_ocr': rango, 'puntaje': puntos})
+                    print(f"  ✓ Fallback fila rango={rango} puntaje={puntos}")
 
-        # Construir datos finales priorizando los rangos detectados
+        # Quitar duplicados por puntaje conservando el de mayor confianza posicional (primer aparición)
+        puntajes_vistos = set()
+        filas_unicas = []
+        for fila in sorted(filas_detectadas, key=lambda x: x['top']):
+            p = fila['puntaje']
+            if p in puntajes_vistos:
+                continue
+            puntajes_vistos.add(p)
+            filas_unicas.append(fila)
+
+        # Construir datos finales: SIEMPRE renumerar secuencial para no inventar Pos8/Pos9.
         datos = {}
-        for rango in sorted(datos_por_rango.keys()):
-            datos[f"Pos{rango}"] = datos_por_rango[rango]
-
-        # Completar posiciones faltantes con candidatos fallback
-        pos_libres = [i for i in range(1, 11) if f"Pos{i}" not in datos]
-        for i, puntos in enumerate(candidatos_sin_rango):
-            if i >= len(pos_libres):
-                break
-            datos[f"Pos{pos_libres[i]}"] = puntos
+        for idx, fila in enumerate(filas_unicas[:10], 1):
+            datos[f"Pos{idx}"] = fila['puntaje']
         
         print(f"✅ Datos extraídos: {len(datos)} posiciones")
         
