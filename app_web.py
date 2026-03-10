@@ -8,41 +8,52 @@ import re
 import os
 from io import BytesIO
 from datetime import datetime
+from pathlib import Path
 
-from PIL import Image
+from PIL import Image, ImageEnhance
 
 app = Flask(__name__)
 app.secret_key = 'mineria_analyzer_2024'
 
+# ─── Motor OCR: EasyOCR (primario) + Tesseract (secundario) ───────────────
 reader = None
-ocr_status = {
-    'ok': False,
-    'error': None
-}
+ocr_status = {'ok': False, 'error': None}
+_tesseract_ok = False
+
+try:
+    import pytesseract
+    for _p in [r'C:\Program Files\Tesseract-OCR\tesseract.exe',
+               r'C:\Program Files (x86)\Tesseract-OCR\tesseract.exe']:
+        if Path(_p).exists():
+            pytesseract.pytesseract.tesseract_cmd = _p
+            _tesseract_ok = True
+            break
+    if _tesseract_ok:
+        print("✅ Tesseract OCR disponible como motor secundario")
+except ImportError:
+    pytesseract = None
 
 
 def inicializar_ocr():
-    """Inicializa OCR bajo demanda para evitar caídas al boot en PaaS."""
+    """Inicializa EasyOCR bajo demanda."""
     global reader
-
     if reader is not None:
         return True
-
     if ocr_status['error'] is not None:
         return False
-
     try:
-        print("🔄 Iniciando motor OCR (lazy init)...")
+        print("🔄 Iniciando motor OCR (EasyOCR)...")
         import easyocr
         reader = easyocr.Reader(['en'], gpu=False, verbose=False)
         ocr_status['ok'] = True
-        print("✅ Motor OCR listo!")
+        print("✅ EasyOCR listo!")
         return True
     except Exception as e:
         ocr_status['ok'] = False
         ocr_status['error'] = str(e)
-        print(f"❌ OCR no disponible: {e}")
+        print(f"❌ EasyOCR no disponible: {e}")
         return False
+
 
 # Almacén de datos de sesiones
 datos_almacenados = {
@@ -52,96 +63,96 @@ datos_almacenados = {
 
 
 def _corregir_puntaje_con_rango(puntaje, rango):
-    """Corrige cuando el OCR pega el número de rango al puntaje (ej: 536897354 -> 36897354)."""
+    """Corrige cuando el OCR pega el número de rango al puntaje."""
     texto = str(puntaje)
-    
+
     def _es_plausible(val_txt):
         if not val_txt or not val_txt.isdigit():
             return False
         return len(val_txt) in (7, 8) and 1_000_000 <= int(val_txt) <= 99_999_999
-    
-    # Si ya es plausible (7-8 dígitos), no tocar
+
     if _es_plausible(texto):
         return puntaje
-    
+
     candidatos = []
-    
-    # Si tenemos rango, intentar quitar ese prefijo
     if rango is not None:
         rango_txt = str(rango)
         if texto.startswith(rango_txt):
             candidatos.append(texto[len(rango_txt):])
-    
-    # Recortar 1 o 2 dígitos de prefijo espurio
+
     if len(texto) >= 9:
         candidatos.append(texto[1:])
     if len(texto) >= 10:
         candidatos.append(texto[2:])
-    
+
     for cand in candidatos:
         if _es_plausible(cand):
             return int(cand)
-    
-    # Último recurso: tomar sufijo de 8 o 7 dígitos
+
     if len(texto) > 8:
         for n in (8, 7):
             suf = texto[-n:]
             if _es_plausible(suf):
                 return int(suf)
-    
+
     return puntaje
 
+
+# ─── Generación de variantes de imagen ────────────────────────────────────
 
 def _generar_variantes_imagen(imagen):
     """Genera múltiples variantes de la imagen para OCR multipase."""
     import numpy as np
-    from PIL import ImageEnhance, ImageFilter
 
     width, height = imagen.size
-    # Escalar agresivamente para fuentes pixel
     if width < 1200:
         scale = max(3, 1200 // width)
         imagen = imagen.resize(
             (width * scale, height * scale),
-            Image.Resampling.NEAREST  # NEAREST preserva bordes de pixel art
+            Image.Resampling.NEAREST
         )
 
     variantes = []
 
-    # --- Variante 1: Binarización con umbral alto (texto amarillo/blanco) ---
+    # V1: Binarización con umbral adaptativo (auto-detecta rango)
     gris = imagen.convert('L')
-    # Umbral adaptativo: los textos amarillos en fondo oscuro son brillantes
-    bw_alto = gris.point(lambda p: 255 if p > 140 else 0)
+    import numpy as _np
+    arr_gris = _np.array(gris)
+    max_val = int(arr_gris.max())
+
+    # Umbral alto: ~70% del máximo
+    thr_alto = max(max_val * 70 // 100, 50)
+    bw_alto = gris.point(lambda p, t=thr_alto: 255 if p > t else 0)
     variantes.append(('bin_alto', bw_alto))
 
-    # --- Variante 2: Binarización con umbral bajo ---
-    bw_bajo = gris.point(lambda p: 255 if p > 100 else 0)
+    # Umbral bajo: ~50% del máximo
+    thr_bajo = max(max_val * 50 // 100, 30)
+    bw_bajo = gris.point(lambda p, t=thr_bajo: 255 if p > t else 0)
     variantes.append(('bin_bajo', bw_bajo))
 
-    # --- Variante 3: Contraste + nitidez sobre color ---
+    # V3: Contraste + nitidez sobre color
     enhancer = ImageEnhance.Contrast(imagen)
     img_c = enhancer.enhance(2.5)
     enhancer = ImageEnhance.Sharpness(img_c)
     img_cs = enhancer.enhance(2.0)
     variantes.append(('color_enhanced', img_cs))
 
-    # --- Variante 4: Canal de brillo (V de HSV) binarizado ---
-    import colorsys
+    # V4: Canal de brillo (max RGB) binarizado con umbral adaptativo
     arr = np.array(imagen)
-    # Extraer brillo máximo por canal para capturar texto amarillo
     brillo = np.max(arr, axis=2)
-    bw_brillo = Image.fromarray(np.where(brillo > 130, 255, 0).astype(np.uint8))
+    thr_brillo = max(int(brillo.max()) * 60 // 100, 40)
+    bw_brillo = Image.fromarray(np.where(brillo > thr_brillo, 255, 0).astype(np.uint8))
     variantes.append(('brillo', bw_brillo))
 
     return variantes
 
 
+# ─── Extracción de números (EasyOCR) ──────────────────────────────────────
+
 def _extraer_numeros_de_texto(textos, usar_correccion_letras=False):
-    """Extrae números de puntaje de una lista de textos OCR."""
+    """Extrae números de puntaje de una lista de textos OCR (EasyOCR)."""
     numeros = []
 
-    # Intentar formato estructurado: "rango. nombre - puntaje"
-    # Normalizar l/I/O en zona de puntaje (después del guión)
     texto_completo = "\n".join(textos)
     lineas = re.findall(
         r'(\d{1,2})\s*[.,\)]\s*\S+.*?[-–—]\s*([\dOoIl][\dOoIl\.,]{5,})',
@@ -149,7 +160,6 @@ def _extraer_numeros_de_texto(textos, usar_correccion_letras=False):
     )
     if lineas:
         for rango_str, puntaje_str in lineas:
-            # Corregir caracteres confundidos con dígitos en zona numérica
             puntaje_str = puntaje_str.replace('O', '0').replace('o', '0').replace('I', '1').replace('l', '1')
             solo_digitos = re.sub(r'\D', '', puntaje_str)
             if solo_digitos and len(solo_digitos) >= 7:
@@ -160,10 +170,7 @@ def _extraer_numeros_de_texto(textos, usar_correccion_letras=False):
         if len(numeros) >= 5:
             return numeros
 
-    # Fallback: tokens individuales
     for texto in textos:
-        # Aplicar corrección de caracteres si el token parece numérico
-        # (incluir l/I/O que el OCR confunde con dígitos)
         if re.search(r'[\dOoIl]{5,}', texto):
             texto = texto.replace('O', '0').replace('o', '0').replace('I', '1').replace('l', '1')
         elif usar_correccion_letras and re.search(r'\d{5,}', texto):
@@ -180,41 +187,147 @@ def _extraer_numeros_de_texto(textos, usar_correccion_letras=False):
     return numeros
 
 
+# ─── Extracción Tesseract (secundario) ────────────────────────────────────
+
+def _extraer_con_tesseract(imagen):
+    """Extrae puntajes con Tesseract como motor secundario."""
+    if not _tesseract_ok or pytesseract is None:
+        return []
+
+    import numpy as np
+
+    width, height = imagen.size
+    if width < 1200:
+        scale = max(3, 1200 // width)
+        imagen = imagen.resize(
+            (width * scale, height * scale),
+            Image.Resampling.NEAREST
+        )
+
+    # Normalizar a rango completo (crucial para imágenes oscuras)
+    arr_gris = np.array(imagen.convert('L')).astype(float)
+    vmin, vmax = arr_gris.min(), arr_gris.max()
+    if vmax > vmin:
+        arr_norm = ((arr_gris - vmin) / (vmax - vmin) * 255).astype(np.uint8)
+    else:
+        return []
+
+    resultados = []
+
+    # Variante 1: Normalizado invertido (dark text on white) con diferentes umbrales
+    for thr in [80, 100, 120]:
+        bw = Image.fromarray(np.where(arr_norm > thr, 0, 255).astype(np.uint8))
+        for psm in [6, 4]:
+            texto = pytesseract.image_to_string(bw, config=f'--oem 3 --psm {psm}')
+            nums = _extraer_de_texto_tesseract(texto)
+            if nums:
+                resultados.append(nums)
+
+    # Variante 2: Brillo máximo normalizado invertido
+    arr = np.array(imagen)
+    brillo = np.max(arr, axis=2).astype(float)
+    bmin, bmax = brillo.min(), brillo.max()
+    if bmax > bmin:
+        brillo_norm = ((brillo - bmin) / (bmax - bmin) * 255).astype(np.uint8)
+        bw_br = Image.fromarray(np.where(brillo_norm > 90, 0, 255).astype(np.uint8))
+        texto = pytesseract.image_to_string(bw_br, config='--oem 3 --psm 6')
+        nums = _extraer_de_texto_tesseract(texto)
+        if nums:
+            resultados.append(nums)
+
+    # Variante 3: Contraste alto + normalización
+    enh = ImageEnhance.Contrast(imagen)
+    img_c = enh.enhance(5.0)
+    arr_c = np.array(img_c.convert('L')).astype(float)
+    cmin, cmax = arr_c.min(), arr_c.max()
+    if cmax > cmin:
+        arr_cn = ((arr_c - cmin) / (cmax - cmin) * 255).astype(np.uint8)
+        bw_cn = Image.fromarray(np.where(arr_cn > 100, 0, 255).astype(np.uint8))
+        texto = pytesseract.image_to_string(bw_cn, config='--oem 3 --psm 6')
+        nums = _extraer_de_texto_tesseract(texto)
+        if nums:
+            resultados.append(nums)
+
+    # Combinar todos los números de Tesseract
+    todos = []
+    for r in resultados:
+        todos.extend(r)
+    return todos
+
+
+def _extraer_de_texto_tesseract(texto):
+    """Extrae puntajes del texto libre de Tesseract."""
+    numeros = []
+    for linea in texto.split('\n'):
+        linea = linea.strip()
+        if not linea:
+            continue
+
+        # Corregir letras comunes confundidas con dígitos
+        linea_corr = linea
+        # Solo en zona numérica (después del guión/separador)
+        match_line = re.search(r'[-–—]\s*(.+)$', linea_corr)
+        if match_line:
+            zona_num = match_line.group(1)
+            zona_corr = zona_num.replace('S', '5').replace('s', '5').replace('O', '0').replace('o', '0')
+            zona_corr = zona_corr.replace('I', '1').replace('l', '1').replace('B', '8').replace('H', '4')
+            linea_corr = linea_corr[:match_line.start(1)] + zona_corr
+
+        match = re.search(r'(\d{1,2})\s*[.\)]\s*\S+.*?[-–—]\s*(\d[\d\.,]{5,})', linea_corr)
+        if match:
+            rango = int(match.group(1))
+            puntos_txt = re.sub(r'\D', '', match.group(2))
+            if puntos_txt and len(puntos_txt) >= 7:
+                puntos = int(puntos_txt)
+                puntos = _corregir_puntaje_con_rango(puntos, rango)
+                if 1_000_000 <= puntos <= 99_999_999:
+                    numeros.append(puntos)
+                    continue
+
+        for token in re.findall(r'\d[\d\.,]{5,}', linea_corr):
+            valor_txt = re.sub(r'\D', '', token)
+            if len(valor_txt) >= 7:
+                valor = int(valor_txt)
+                valor = _corregir_puntaje_con_rango(valor, None)
+                if 1_000_000 <= valor <= 99_999_999:
+                    numeros.append(valor)
+
+    return numeros
+
+
+# ─── Consenso multipase ───────────────────────────────────────────────────
+
 def _consenso_multipase(resultados_por_variante):
     """
-    Cruza resultados de múltiples pasadas OCR y elige el valor más frecuente
-    para cada posición del ranking (por cercanía de valor).
+    Cruza resultados de múltiples pasadas OCR y elige los mejores valores.
+    Prioriza variantes que producen exactamente 10 resultados únicos.
     """
     from collections import Counter
 
-    # Filtrar variantes vacías
     variantes_con_datos = [nums for nums in resultados_por_variante if nums]
 
     if not variantes_con_datos:
         return []
 
-    # Si solo una variante detectó datos suficientes (>=5), confiar en ella
     if len(variantes_con_datos) == 1:
-        return sorted(set(variantes_con_datos[0]), reverse=True)
+        return sorted(set(variantes_con_datos[0]), reverse=True)[:10]
 
-    # Encontrar la "mejor" variante (más resultados en rango plausible)
-    mejor_variante = max(variantes_con_datos, key=len)
-    max_resultados = len(mejor_variante)
+    # PRIORIDAD: si alguna variante produce exactamente 10 resultados únicos, usarla
+    for nums in sorted(variantes_con_datos, key=lambda x: abs(len(set(x)) - 10)):
+        unicos = sorted(set(nums), reverse=True)
+        if len(unicos) == 10:
+            return unicos
 
-    # Si la mejor variante tiene >=8 resultados y las demás tienen significativamente menos,
-    # usar la mejor como base y solo añadir valores confirmados por otras
-    otras_variantes = [nums for nums in variantes_con_datos if nums is not mejor_variante]
-    if max_resultados >= 8:
-        resultado_base = sorted(set(mejor_variante), reverse=True)
-        # Solo añadir de otras variantes si están confirmados por la mejor
-        return resultado_base[:10]
+    # Si alguna variante tiene 8-9 resultados únicos, también es confiable
+    for nums in sorted(variantes_con_datos, key=lambda x: -len(set(x))):
+        unicos = sorted(set(nums), reverse=True)
+        if len(unicos) >= 8:
+            return unicos[:10]
 
-    # Recopilar todos los números de todas las variantes
     todos = []
     for nums in variantes_con_datos:
         todos.extend(nums)
 
-    # Agrupar números cercanos (dentro del 2% del valor)
     todos_sorted = sorted(set(todos), reverse=True)
     grupos = []
     usado = set()
@@ -232,39 +345,36 @@ def _consenso_multipase(resultados_por_variante):
                 usado.add(otro)
         grupos.append(grupo)
 
-    # Para cada grupo, contar en cuántas variantes aparece
     conteo_global = Counter(todos)
     num_variantes_activas = len(variantes_con_datos)
     resultado = []
     for grupo in grupos:
-        variantes_con_grupo = 0
-        for nums_variante in variantes_con_datos:
-            if any(v in nums_variante for v in grupo):
-                variantes_con_grupo += 1
-        
-        # Umbral adaptativo: si hay pocas variantes activas, aceptar con menos
+        variantes_con_grupo = sum(
+            1 for nums_variante in variantes_con_datos
+            if any(v in nums_variante for v in grupo)
+        )
+
         if num_variantes_activas <= 2:
             min_variantes = 1
         else:
             min_variantes = max(2, num_variantes_activas // 2)
-        
+
         if variantes_con_grupo < min_variantes:
             continue
-        
+
         mejor = max(grupo, key=lambda v: conteo_global[v])
         resultado.append((mejor, variantes_con_grupo))
 
-    # Ordenar por valor descendente
     resultado.sort(key=lambda x: x[0], reverse=True)
+    return [val for val, _ in resultado]
 
-    # Retornar solo los valores
-    return [val for val, freq in resultado]
 
+# ─── Función principal de extracción ──────────────────────────────────────
 
 def extraer_datos_imagen(imagen_bytes):
     """
-    Extrae solo los puntos de una imagen y los asigna a posiciones 1-10.
-    Usa múltiples variantes de preprocesamiento y consenso para mayor precisión.
+    Extrae puntajes de una imagen usando EasyOCR (primario) + Tesseract (secundario).
+    Múltiples variantes de preprocesamiento + consenso para mayor precisión.
     """
     try:
         if not inicializar_ocr():
@@ -272,31 +382,30 @@ def extraer_datos_imagen(imagen_bytes):
                 'datos': {},
                 'textos': [],
                 'exito': False,
-                'error': f"OCR no disponible en el servidor: {ocr_status['error']}"
+                'error': f"OCR no disponible: {ocr_status['error']}"
             }
 
         imagen = Image.open(BytesIO(imagen_bytes))
         if imagen.mode == 'RGBA':
             imagen = imagen.convert('RGB')
-        
-        # Generar múltiples variantes de preprocesamiento
+
+        # ── EasyOCR: variantes de preprocesamiento ──
         variantes = _generar_variantes_imagen(imagen)
-        
+
         resultados_por_variante = []
         textos_detectados = []
-        
+
         for nombre_var, img_var in variantes:
             temp_path = f"temp_ocr_{nombre_var}.png"
             img_var.save(temp_path)
-            
             try:
                 resultados = reader.readtext(temp_path, paragraph=False, detail=1)
                 textos_var = [texto.strip() for (bbox, texto, prob) in resultados]
                 print(f"📝 [{nombre_var}] ({len(textos_var)}): {textos_var}")
-                
+
                 if not textos_detectados:
                     textos_detectados = textos_var
-                
+
                 numeros = _extraer_numeros_de_texto(textos_var, usar_correccion_letras=True)
                 if numeros:
                     resultados_por_variante.append(numeros)
@@ -304,28 +413,36 @@ def extraer_datos_imagen(imagen_bytes):
             finally:
                 if os.path.exists(temp_path):
                     os.remove(temp_path)
-        
-        # Consenso multipase: cruzar resultados de todas las variantes
+
+        # ── Tesseract: pasadas adicionales (si está disponible) ──
+        if _tesseract_ok:
+            numeros_tess = _extraer_con_tesseract(imagen)
+            if numeros_tess:
+                resultados_por_variante.append(numeros_tess)
+                print(f"  📊 [tesseract] números: {numeros_tess}")
+
+        # ── Consenso multipase ──
         numeros_finales = _consenso_multipase(resultados_por_variante)
-        
+
         print(f"✅ Consenso final: {numeros_finales}")
-        
-        # Asignar a posiciones 1-10
+
         datos = {}
         for i, puntos in enumerate(numeros_finales[:10], 1):
             datos[f"Pos{i}"] = puntos
-        
+
         print(f"📊 Números encontrados: {len(numeros_finales)}")
         print(f"✅ Datos extraídos: {datos}")
-        
+
         return {
             'datos': datos,
             'textos': textos_detectados,
             'exito': len(datos) > 0
         }
-        
+
     except Exception as e:
         print(f"❌ Error: {e}")
+        import traceback
+        traceback.print_exc()
         return {
             'datos': {},
             'textos': [],
