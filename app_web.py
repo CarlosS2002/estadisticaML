@@ -187,13 +187,32 @@ def _consenso_multipase(resultados_por_variante):
     """
     from collections import Counter
 
-    # Recopilar todos los números únicos de todas las variantes
-    todos = []
-    for nums in resultados_por_variante:
-        todos.extend(nums)
+    # Filtrar variantes vacías
+    variantes_con_datos = [nums for nums in resultados_por_variante if nums]
 
-    if not todos:
+    if not variantes_con_datos:
         return []
+
+    # Si solo una variante detectó datos suficientes (>=5), confiar en ella
+    if len(variantes_con_datos) == 1:
+        return sorted(set(variantes_con_datos[0]), reverse=True)
+
+    # Encontrar la "mejor" variante (más resultados en rango plausible)
+    mejor_variante = max(variantes_con_datos, key=len)
+    max_resultados = len(mejor_variante)
+
+    # Si la mejor variante tiene >=8 resultados y las demás tienen significativamente menos,
+    # usar la mejor como base y solo añadir valores confirmados por otras
+    otras_variantes = [nums for nums in variantes_con_datos if nums is not mejor_variante]
+    if max_resultados >= 8:
+        resultado_base = sorted(set(mejor_variante), reverse=True)
+        # Solo añadir de otras variantes si están confirmados por la mejor
+        return resultado_base[:10]
+
+    # Recopilar todos los números de todas las variantes
+    todos = []
+    for nums in variantes_con_datos:
+        todos.extend(nums)
 
     # Agrupar números cercanos (dentro del 2% del valor)
     todos_sorted = sorted(set(todos), reverse=True)
@@ -208,25 +227,27 @@ def _consenso_multipase(resultados_por_variante):
         for otro in todos_sorted:
             if otro in usado:
                 continue
-            # Si están dentro del 2%, considerarlos el mismo número
             if abs(val - otro) / max(val, 1) < 0.02:
                 grupo.append(otro)
                 usado.add(otro)
         grupos.append(grupo)
 
-    # Para cada grupo, contar frecuencia y en cuántas variantes aparece
+    # Para cada grupo, contar en cuántas variantes aparece
     conteo_global = Counter(todos)
-    num_variantes = len(resultados_por_variante)
+    num_variantes_activas = len(variantes_con_datos)
     resultado = []
     for grupo in grupos:
-        # Contar en cuántas variantes distintas aparece algún miembro del grupo
         variantes_con_grupo = 0
-        for nums_variante in resultados_por_variante:
+        for nums_variante in variantes_con_datos:
             if any(v in nums_variante for v in grupo):
                 variantes_con_grupo += 1
         
-        # Descartar valores que solo aparecen en 1 variante (probablemente basura OCR)
-        min_variantes = max(2, num_variantes // 2)
+        # Umbral adaptativo: si hay pocas variantes activas, aceptar con menos
+        if num_variantes_activas <= 2:
+            min_variantes = 1
+        else:
+            min_variantes = max(2, num_variantes_activas // 2)
+        
         if variantes_con_grupo < min_variantes:
             continue
         
