@@ -173,7 +173,7 @@ def generar_analisis_ia(analisis):
     max_ganado = resumen['max_ganado']
     total_jugadores = len(tabla)
     activos = [r for r in tabla if r['estado'] == 'activo']
-    inactivos = [r for r in tabla if r['estado'] == 'inactivo']
+    inactivos = [r['jugador'] for r in tabla if r['estado'] == 'inactivo']
 
     pct_activos = len(activos) / total_jugadores * 100
     if pct_activos >= 80:
