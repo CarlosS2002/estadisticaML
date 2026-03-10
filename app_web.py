@@ -92,10 +92,158 @@ def _corregir_puntaje_con_rango(puntaje, rango):
     return puntaje
 
 
+def _generar_variantes_imagen(imagen):
+    """Genera múltiples variantes de la imagen para OCR multipase."""
+    import numpy as np
+    from PIL import ImageEnhance, ImageFilter
+
+    width, height = imagen.size
+    # Escalar agresivamente para fuentes pixel
+    if width < 1200:
+        scale = max(3, 1200 // width)
+        imagen = imagen.resize(
+            (width * scale, height * scale),
+            Image.Resampling.NEAREST  # NEAREST preserva bordes de pixel art
+        )
+
+    variantes = []
+
+    # --- Variante 1: Binarización con umbral alto (texto amarillo/blanco) ---
+    gris = imagen.convert('L')
+    # Umbral adaptativo: los textos amarillos en fondo oscuro son brillantes
+    bw_alto = gris.point(lambda p: 255 if p > 140 else 0)
+    variantes.append(('bin_alto', bw_alto))
+
+    # --- Variante 2: Binarización con umbral bajo ---
+    bw_bajo = gris.point(lambda p: 255 if p > 100 else 0)
+    variantes.append(('bin_bajo', bw_bajo))
+
+    # --- Variante 3: Contraste + nitidez sobre color ---
+    enhancer = ImageEnhance.Contrast(imagen)
+    img_c = enhancer.enhance(2.5)
+    enhancer = ImageEnhance.Sharpness(img_c)
+    img_cs = enhancer.enhance(2.0)
+    variantes.append(('color_enhanced', img_cs))
+
+    # --- Variante 4: Canal de brillo (V de HSV) binarizado ---
+    import colorsys
+    arr = np.array(imagen)
+    # Extraer brillo máximo por canal para capturar texto amarillo
+    brillo = np.max(arr, axis=2)
+    bw_brillo = Image.fromarray(np.where(brillo > 130, 255, 0).astype(np.uint8))
+    variantes.append(('brillo', bw_brillo))
+
+    return variantes
+
+
+def _extraer_numeros_de_texto(textos, usar_correccion_letras=False):
+    """Extrae números de puntaje de una lista de textos OCR."""
+    numeros = []
+
+    # Intentar formato estructurado: "rango. nombre - puntaje"
+    # Normalizar l/I/O en zona de puntaje (después del guión)
+    texto_completo = "\n".join(textos)
+    lineas = re.findall(
+        r'(\d{1,2})\s*[.,\)]\s*\S+.*?[-–—]\s*([\dOoIl][\dOoIl\.,]{5,})',
+        texto_completo
+    )
+    if lineas:
+        for rango_str, puntaje_str in lineas:
+            # Corregir caracteres confundidos con dígitos en zona numérica
+            puntaje_str = puntaje_str.replace('O', '0').replace('o', '0').replace('I', '1').replace('l', '1')
+            solo_digitos = re.sub(r'\D', '', puntaje_str)
+            if solo_digitos and len(solo_digitos) >= 7:
+                puntos = int(solo_digitos)
+                puntos = _corregir_puntaje_con_rango(puntos, int(rango_str))
+                if 1_000_000 <= puntos <= 99_999_999:
+                    numeros.append(puntos)
+        if len(numeros) >= 5:
+            return numeros
+
+    # Fallback: tokens individuales
+    for texto in textos:
+        # Aplicar corrección de caracteres si el token parece numérico
+        # (incluir l/I/O que el OCR confunde con dígitos)
+        if re.search(r'[\dOoIl]{5,}', texto):
+            texto = texto.replace('O', '0').replace('o', '0').replace('I', '1').replace('l', '1')
+        elif usar_correccion_letras and re.search(r'\d{5,}', texto):
+            texto = texto.replace('O', '0').replace('o', '0').replace('I', '1').replace('l', '1')
+
+        for num_str in re.findall(r'\d[\d\.,]*\d', texto):
+            solo_digitos = re.sub(r'\D', '', num_str)
+            if len(solo_digitos) >= 7:
+                puntos = int(solo_digitos)
+                puntos = _corregir_puntaje_con_rango(puntos, None)
+                if 1_000_000 <= puntos <= 99_999_999:
+                    numeros.append(puntos)
+
+    return numeros
+
+
+def _consenso_multipase(resultados_por_variante):
+    """
+    Cruza resultados de múltiples pasadas OCR y elige el valor más frecuente
+    para cada posición del ranking (por cercanía de valor).
+    """
+    from collections import Counter
+
+    # Recopilar todos los números únicos de todas las variantes
+    todos = []
+    for nums in resultados_por_variante:
+        todos.extend(nums)
+
+    if not todos:
+        return []
+
+    # Agrupar números cercanos (dentro del 2% del valor)
+    todos_sorted = sorted(set(todos), reverse=True)
+    grupos = []
+    usado = set()
+
+    for val in todos_sorted:
+        if val in usado:
+            continue
+        grupo = [val]
+        usado.add(val)
+        for otro in todos_sorted:
+            if otro in usado:
+                continue
+            # Si están dentro del 2%, considerarlos el mismo número
+            if abs(val - otro) / max(val, 1) < 0.02:
+                grupo.append(otro)
+                usado.add(otro)
+        grupos.append(grupo)
+
+    # Para cada grupo, contar frecuencia y en cuántas variantes aparece
+    conteo_global = Counter(todos)
+    num_variantes = len(resultados_por_variante)
+    resultado = []
+    for grupo in grupos:
+        # Contar en cuántas variantes distintas aparece algún miembro del grupo
+        variantes_con_grupo = 0
+        for nums_variante in resultados_por_variante:
+            if any(v in nums_variante for v in grupo):
+                variantes_con_grupo += 1
+        
+        # Descartar valores que solo aparecen en 1 variante (probablemente basura OCR)
+        min_variantes = max(2, num_variantes // 2)
+        if variantes_con_grupo < min_variantes:
+            continue
+        
+        mejor = max(grupo, key=lambda v: conteo_global[v])
+        resultado.append((mejor, variantes_con_grupo))
+
+    # Ordenar por valor descendente
+    resultado.sort(key=lambda x: x[0], reverse=True)
+
+    # Retornar solo los valores
+    return [val for val, freq in resultado]
+
+
 def extraer_datos_imagen(imagen_bytes):
     """
-    Extrae solo los puntos de una imagen y los asigna a posiciones 1-10
-    Simplificado para evitar errores de OCR con nombres
+    Extrae solo los puntos de una imagen y los asigna a posiciones 1-10.
+    Usa múltiples variantes de preprocesamiento y consenso para mayor precisión.
     """
     try:
         if not inicializar_ocr():
@@ -106,111 +254,47 @@ def extraer_datos_imagen(imagen_bytes):
                 'error': f"OCR no disponible en el servidor: {ocr_status['error']}"
             }
 
-        # Guardar imagen temporalmente
         imagen = Image.open(BytesIO(imagen_bytes))
         if imagen.mode == 'RGBA':
             imagen = imagen.convert('RGB')
         
-        # === PREPROCESAMIENTO MEJORADO PARA FUENTES PIXEL ===
-        from PIL import ImageEnhance
+        # Generar múltiples variantes de preprocesamiento
+        variantes = _generar_variantes_imagen(imagen)
         
-        # 1. Escalar imagen para mejorar lectura de fuentes pixel
-        width, height = imagen.size
-        if width < 900:
-            scale = max(3, 900 // width)
-            imagen_grande = imagen.resize(
-                (min(width * scale, 1800), min(height * scale, 1800)),
-                Image.Resampling.LANCZOS
-            )
-        else:
-            imagen_grande = imagen
-        
-        # 2. Aumentar contraste
-        enhancer = ImageEnhance.Contrast(imagen_grande)
-        imagen_contraste = enhancer.enhance(2.0)
-        
-        # 3. Aumentar nitidez
-        enhancer = ImageEnhance.Sharpness(imagen_contraste)
-        imagen_nitida = enhancer.enhance(1.8)
-        
-        # Guardar para OCR
-        temp_path = "temp_upload_color.png"
-        imagen_nitida.save(temp_path)
-        
-        # OCR con detalle de posición (bbox)
-        resultados = reader.readtext(temp_path, paragraph=False, detail=1)
-        
+        resultados_por_variante = []
         textos_detectados = []
-        for (bbox, texto, prob) in resultados:
-            textos_detectados.append(texto.strip())
         
-        print(f"📝 Textos detectados ({len(textos_detectados)}): {textos_detectados}")
-        
-        # === EXTRACCIÓN INTELIGENTE DE PUNTAJES ===
-        todos_los_numeros = []
-        
-        # Paso 1: Intentar parsear líneas con formato "rango. nombre - puntaje"
-        texto_completo = "\n".join(textos_detectados)
-        lineas_parseadas = re.findall(
-            r'(\d{1,2})\s*[.\)]\s*\w+.*?[-–—]\s*(\d[\d\.,]{5,})',
-            texto_completo
-        )
-        
-        if lineas_parseadas:
-            print("📋 Formato estructurado detectado")
-            for rango_str, puntaje_str in lineas_parseadas:
-                solo_digitos = re.sub(r'\D', '', puntaje_str)
-                if solo_digitos and len(solo_digitos) >= 7:
-                    puntos = int(solo_digitos)
-                    puntos = _corregir_puntaje_con_rango(puntos, int(rango_str))
-                    if 1_000_000 <= puntos <= 99_999_999:
-                        todos_los_numeros.append(puntos)
-                        print(f"  ✓ Línea {rango_str}: {puntaje_str} -> {puntos}")
-        
-        # Paso 2: Fallback - extraer números individuales de cada texto OCR
-        if len(todos_los_numeros) < 3:
-            print("🔄 Fallback: extracción por tokens individuales")
-            todos_los_numeros = []
-            for texto in textos_detectados:
-                # Solo aplicar correcciones de caracteres a tokens que
-                # ya parecen numéricos (evitar contaminar nombres)
-                if re.search(r'\d{5,}', texto):
-                    texto_limpio = texto.replace('O', '0').replace('o', '0').replace('I', '1').replace('l', '1')
-                else:
-                    texto_limpio = texto
+        for nombre_var, img_var in variantes:
+            temp_path = f"temp_ocr_{nombre_var}.png"
+            img_var.save(temp_path)
+            
+            try:
+                resultados = reader.readtext(temp_path, paragraph=False, detail=1)
+                textos_var = [texto.strip() for (bbox, texto, prob) in resultados]
+                print(f"📝 [{nombre_var}] ({len(textos_var)}): {textos_var}")
                 
-                numeros_encontrados = re.findall(r'\d[\d\.,]*\d', texto_limpio)
+                if not textos_detectados:
+                    textos_detectados = textos_var
                 
-                for num_str in numeros_encontrados:
-                    solo_digitos = re.sub(r'\D', '', num_str)
-                    if len(solo_digitos) >= 7:
-                        puntos = int(solo_digitos)
-                        puntos = _corregir_puntaje_con_rango(puntos, None)
-                        if 1_000_000 <= puntos <= 99_999_999:
-                            todos_los_numeros.append(puntos)
-                            print(f"  ✓ Encontrado: {texto} -> {puntos}")
+                numeros = _extraer_numeros_de_texto(textos_var, usar_correccion_letras=True)
+                if numeros:
+                    resultados_por_variante.append(numeros)
+                    print(f"  📊 [{nombre_var}] números: {numeros}")
+            finally:
+                if os.path.exists(temp_path):
+                    os.remove(temp_path)
         
-        # Eliminar duplicados conservando orden
-        numeros_unicos = []
-        vistos = set()
-        for n in todos_los_numeros:
-            if n not in vistos:
-                vistos.add(n)
-                numeros_unicos.append(n)
+        # Consenso multipase: cruzar resultados de todas las variantes
+        numeros_finales = _consenso_multipase(resultados_por_variante)
         
-        # Ordenar por valor descendente (ranking natural)
-        numeros_unicos.sort(reverse=True)
+        print(f"✅ Consenso final: {numeros_finales}")
         
         # Asignar a posiciones 1-10
         datos = {}
-        for i, puntos in enumerate(numeros_unicos[:10], 1):
+        for i, puntos in enumerate(numeros_finales[:10], 1):
             datos[f"Pos{i}"] = puntos
         
-        # Limpiar archivos temporales
-        if os.path.exists(temp_path):
-            os.remove(temp_path)
-        
-        print(f"📊 Números encontrados: {len(todos_los_numeros)}")
+        print(f"📊 Números encontrados: {len(numeros_finales)}")
         print(f"✅ Datos extraídos: {datos}")
         
         return {
