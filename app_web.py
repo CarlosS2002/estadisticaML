@@ -23,9 +23,8 @@ except ImportError:
 app = Flask(__name__)
 app.secret_key = 'mineria_analyzer_2024'
 
-# Inicializar OCR (solo una vez)
-print("🔄 Iniciando motor OCR...")
-reader = easyocr.Reader(['es', 'en'], gpu=False, verbose=False)
+print("🔄 Iniciando motor OCR (solo inglés, optimizado para Railway)...")
+reader = easyocr.Reader(['en'], gpu=False, verbose=False)
 print("✅ Motor OCR listo!")
 
 # Almacén de datos de sesiones
@@ -50,9 +49,12 @@ def extraer_datos_imagen(imagen_bytes):
         import numpy as np
         from PIL import ImageEnhance
         
-        # 1. Aumentar tamaño 3x
+        # 1. Aumentar tamaño solo si la imagen es pequeña
         width, height = imagen.size
-        imagen_grande = imagen.resize((width * 3, height * 3), Image.Resampling.LANCZOS)
+        if width < 600:
+            imagen_grande = imagen.resize((min(width * 2, 800), min(height * 2, 800)), Image.Resampling.LANCZOS)
+        else:
+            imagen_grande = imagen
         
         # 2. Aumentar contraste
         enhancer = ImageEnhance.Contrast(imagen_grande)
