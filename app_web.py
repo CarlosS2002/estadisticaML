@@ -363,6 +363,7 @@ def generar_analisis_ia(analisis):
     }
 
 
+
 @app.route('/')
 def index():
     tiene_anterior = datos_almacenados['anterior'] is not None
