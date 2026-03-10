@@ -1,0 +1,8 @@
+{
+  "providers": ["..."],
+  "phases": {
+    "setup": {
+      "aptPkgs": ["tesseract-ocr", "tesseract-ocr-eng"]
+    }
+  }
+}
