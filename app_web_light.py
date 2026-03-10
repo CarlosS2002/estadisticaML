@@ -63,7 +63,43 @@ def _corregir_puntaje_pegado_con_rango(puntaje, rango):
         if _es_puntaje_plausible(cand):
             return int(cand)
 
+    # Último recurso: tomar sufijos plausibles de 8 o 7 dígitos.
+    if len(texto) > 8:
+        for n in (8, 7):
+            suf = texto[-n:]
+            if _es_puntaje_plausible(suf):
+                return int(suf)
+
     return puntaje
+
+
+def _extraer_puntajes_agresivo(imagen):
+    """Fallback multipase para recuperar filas faltantes del ranking."""
+    candidatos = []
+
+    # Variante binaria para mejorar separación de dígitos en texto pequeño.
+    gris = imagen.convert('L')
+    bw = gris.point(lambda p: 255 if p > 150 else 0)
+
+    variantes = [imagen, bw]
+    psm_list = [6, 4, 11]
+
+    for var in variantes:
+        for psm in psm_list:
+            config = f'--oem 3 --psm {psm}'
+            texto = pytesseract.image_to_string(var, config=config)
+            for linea in texto.split('\n'):
+                # Extraer secuencias largas que parezcan puntaje.
+                for token in re.findall(r'\d[\d\.,]{6,}', linea):
+                    valor = _limpiar_numero(token)
+                    if valor is None:
+                        continue
+                    valor = _corregir_puntaje_pegado_con_rango(valor, None)
+                    if 1_000_000 <= valor <= 99_999_999:
+                        candidatos.append(valor)
+
+    # Únicos, orden descendente (ranking por puntaje)
+    return sorted(set(candidatos), reverse=True)
 
 
 def extraer_datos_imagen(imagen_bytes):
@@ -77,8 +113,8 @@ def extraer_datos_imagen(imagen_bytes):
         
         # Preprocesamiento simple
         width, height = imagen.size
-        if width < 600:
-            imagen = imagen.resize((min(width * 2, 1000), min(height * 2, 1000)), Image.Resampling.LANCZOS)
+        if width < 900:
+            imagen = imagen.resize((min(width * 3, 1800), min(height * 3, 1800)), Image.Resampling.LANCZOS)
         
         enhancer = ImageEnhance.Contrast(imagen)
         imagen = enhancer.enhance(2.0)
@@ -192,6 +228,20 @@ def extraer_datos_imagen(imagen_bytes):
                 continue
             puntajes_vistos.add(p)
             filas_unicas.append(fila)
+
+        # Rescate: si faltan filas, extraer puntajes extra con OCR multipase.
+        if len(filas_unicas) < 10:
+            extras = _extraer_puntajes_agresivo(imagen)
+            for p in extras:
+                if p in puntajes_vistos:
+                    continue
+                puntajes_vistos.add(p)
+                filas_unicas.append({'top': 1_000_000 + len(filas_unicas), 'rango_ocr': None, 'puntaje': p})
+                if len(filas_unicas) >= 10:
+                    break
+
+        # Si hay mezcla de órdenes, normalizar por puntaje descendente.
+        filas_unicas = sorted(filas_unicas, key=lambda x: x['puntaje'], reverse=True)
 
         # Construir datos finales: SIEMPRE renumerar secuencial para no inventar Pos8/Pos9.
         datos = {}
