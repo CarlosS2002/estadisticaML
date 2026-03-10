@@ -51,37 +51,100 @@ def extraer_datos_imagen(imagen_bytes):
         enhancer = ImageEnhance.Sharpness(imagen)
         imagen = enhancer.enhance(1.8)
         
-        # OCR con texto completo para separar mejor rango y puntaje por línea
-        texto = pytesseract.image_to_string(imagen, config='--psm 6')
-        
-        print(f"📝 Texto detectado: {texto[:200]}...")
-        
-        # Extraer por línea: "rango ... puntaje"
+        # OCR estructurado por palabras para separar mejor rango y puntaje de cada fila
+        ocr_config = '--oem 3 --psm 6 -c tessedit_char_whitelist=0123456789.,'
+        data = pytesseract.image_to_data(imagen, config=ocr_config, output_type=pytesseract.Output.DICT)
+
+        lineas = {}
+        total_boxes = len(data['text'])
+        for i in range(total_boxes):
+            txt = (data['text'][i] or '').strip()
+            if not txt:
+                continue
+
+            conf_raw = data['conf'][i]
+            try:
+                conf = float(conf_raw)
+            except ValueError:
+                conf = -1
+            if conf < 0:
+                continue
+
+            key = (data['block_num'][i], data['par_num'][i], data['line_num'][i])
+            if key not in lineas:
+                lineas[key] = {'tokens': [], 'top': data['top'][i]}
+
+            lineas[key]['tokens'].append((data['left'][i], txt, conf))
+
         datos_por_rango = {}
         candidatos_sin_rango = []
 
-        for linea in texto.split('\n'):
-            linea = linea.strip()
-            if not linea:
+        for _, linea_info in sorted(lineas.items(), key=lambda item: item[1]['top']):
+            tokens = sorted(linea_info['tokens'], key=lambda x: x[0])
+
+            numeros = []
+            for _, txt, _ in tokens:
+                if re.search(r'\d', txt):
+                    valor = _limpiar_numero(txt)
+                    if valor is not None:
+                        numeros.append((txt, valor))
+
+            if not numeros:
                 continue
 
-            # Caso ideal: 1. nombre - 45,009,026
-            match = re.search(r'^\s*(\d{1,2})\D+.*?(\d[\d\.,]{5,})\s*$', linea)
-            if match:
+            # Con whitelist de dígitos normalmente llegan: [rango, puntaje]
+            rango = None
+            for _, valor in numeros:
+                if 1 <= valor <= 10:
+                    rango = valor
+                    break
+
+            # Tomar el número más largo o más grande como puntaje
+            puntaje_candidato = None
+            puntaje_texto = None
+            for txt, valor in numeros:
+                if valor >= 100000:
+                    if puntaje_candidato is None:
+                        puntaje_candidato = valor
+                        puntaje_texto = txt
+                    else:
+                        if len(re.sub(r'\D', '', txt)) > len(re.sub(r'\D', '', puntaje_texto or '')):
+                            puntaje_candidato = valor
+                            puntaje_texto = txt
+                        elif valor > puntaje_candidato:
+                            puntaje_candidato = valor
+                            puntaje_texto = txt
+
+            if puntaje_candidato is None:
+                continue
+
+            # Filtro de sanidad para evitar valores absurdos por OCR
+            if puntaje_candidato < 100000 or puntaje_candidato > 999999999:
+                continue
+
+            if rango is not None and 1 <= rango <= 10:
+                datos_por_rango[rango] = puntaje_candidato
+                print(f"  ✓ Rango {rango}: {puntaje_candidato}")
+            else:
+                candidatos_sin_rango.append(puntaje_candidato)
+                print(f"  ✓ Puntaje fallback: {puntaje_candidato}")
+
+        # Fallback extra si image_to_data no detecta suficiente
+        if len(datos_por_rango) < 3:
+            texto = pytesseract.image_to_string(imagen, config='--psm 6')
+            print(f"📝 Fallback texto: {texto[:200]}...")
+            for linea in texto.split('\n'):
+                linea = linea.strip()
+                if not linea:
+                    continue
+                match = re.search(r'^\s*(\d{1,2})\D+.*?(\d[\d\.,]{5,})\s*$', linea)
+                if not match:
+                    continue
                 rango = int(match.group(1))
                 puntos = _limpiar_numero(match.group(2))
-                if puntos and puntos >= 100000 and 1 <= rango <= 10:
+                if puntos and 100000 <= puntos <= 999999999 and 1 <= rango <= 10 and rango not in datos_por_rango:
                     datos_por_rango[rango] = puntos
-                    print(f"  ✓ Rango {rango}: {puntos}")
-                    continue
-
-            # Fallback: tomar el último número largo de la línea (suele ser el puntaje)
-            numeros = re.findall(r'\d[\d\.,]{5,}', linea)
-            if numeros:
-                puntos = _limpiar_numero(numeros[-1])
-                if puntos and puntos >= 100000:
-                    candidatos_sin_rango.append(puntos)
-                    print(f"  ✓ Puntaje fallback: {puntos}")
+                    print(f"  ✓ Fallback rango {rango}: {puntos}")
 
         # Construir datos finales priorizando los rangos detectados
         datos = {}
