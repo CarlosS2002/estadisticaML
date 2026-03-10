@@ -403,6 +403,7 @@
                         <th>Ganados (Sesión)</th>
                         <th>Déficit vs. Máximo</th>
                         <th>Dist. al Líder</th>
+                        <th>Dif. al Siguiente</th>
                         <th>Estado</th>
                     </tr>
                 </thead>
@@ -595,6 +596,9 @@
                     </td>
                     <td class="${row.distancia_lider > 0 ? 'negative' : 'positive'}">
                         ${row.distancia_lider > 0 ? '-' : ''}${formatNumber(row.distancia_lider)}
+                    </td>
+                    <td class="${row.diferencia_siguiente > 0 ? 'negative' : 'neutral'}">
+                        ${row.diferencia_siguiente > 0 ? '-' + formatNumber(row.diferencia_siguiente) : '👑'}
                     </td>
                     <td>
                         <span class="badge ${row.estado === 'activo' ? 'badge-active' : 'badge-inactive'}">

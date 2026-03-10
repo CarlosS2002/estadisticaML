@@ -155,6 +155,12 @@ def analizar_comparativa(datos_anterior, datos_actual):
         # Distancia al líder (en puntos totales)
         distancia_lider = puntos_lider - puntos_actual
         
+        # Diferencia al siguiente (lo que le falta para alcanzar al de arriba)
+        if rango == 1:
+            diferencia_siguiente = 0
+        else:
+            diferencia_siguiente = datos_ordenados[rango - 2][1] - puntos_actual
+        
         if puntos_anterior > 0:
             porcentaje = (ganado_sesion / puntos_anterior) * 100
         else:
@@ -184,6 +190,7 @@ def analizar_comparativa(datos_anterior, datos_actual):
             'ganado_sesion': ganado_sesion,
             'deficit_vs_maximo': deficit_vs_maximo,
             'distancia_lider': distancia_lider,
+            'diferencia_siguiente': diferencia_siguiente,
             'porcentaje': round(porcentaje, 2),
             'estado': estado
         })
@@ -207,6 +214,125 @@ def analizar_comparativa(datos_anterior, datos_actual):
         'top_activos': jugadores_activos[:5],
         'inactivos': jugadores_inactivos,
         'lider': datos_ordenados[0] if datos_ordenados else None
+    }
+
+
+def generar_analisis_ia(analisis):
+    """
+    Agente IA basado en reglas que analiza patrones y genera conclusiones inteligentes.
+    """
+    conclusiones = []
+    alertas = []
+    predicciones = []
+
+    tabla = analisis['tabla']
+    resumen = analisis['resumen']
+
+    if not tabla:
+        return {'conclusiones': [], 'alertas': [], 'predicciones': []}
+
+    max_ganado = resumen['max_ganado']
+    total_jugadores = len(tabla)
+    activos = [r for r in tabla if r['estado'] == 'activo']
+    inactivos = [r for r in tabla if r['estado'] == 'inactivo']
+
+    # ── CONCLUSIONES GENERALES ──────────────────────────────────────────────
+    pct_activos = len(activos) / total_jugadores * 100
+    if pct_activos >= 80:
+        conclusiones.append(f"💪 Sesión muy activa: {len(activos)} de {total_jugadores} jugadores farmaron puntos ({pct_activos:.0f}% participación).")
+    elif pct_activos >= 50:
+        conclusiones.append(f"⚡ Sesión moderada: {len(activos)} de {total_jugadores} jugadores fueron activos ({pct_activos:.0f}%).")
+    else:
+        conclusiones.append(f"😴 Sesión baja: solo {len(activos)} de {total_jugadores} jugadores activos. Alta inactividad general.")
+
+    if activos and len(activos) > 1:
+        max_act = max(activos, key=lambda x: x['ganado_sesion'])
+        min_act = min(activos, key=lambda x: x['ganado_sesion'])
+        brecha = max_act['ganado_sesion'] - min_act['ganado_sesion']
+        if max_ganado > 0 and brecha > max_ganado * 0.4:
+            conclusiones.append(
+                f"📊 Gran disparidad de rendimiento: {max_act['jugador']} ganó {max_act['ganado_sesion']:,} pts "
+                f"vs {min_act['jugador']} con {min_act['ganado_sesion']:,} pts."
+            )
+        else:
+            conclusiones.append("📈 Rendimiento parejo entre los jugadores activos esta sesión.")
+
+    if inactivos:
+        conclusiones.append(f"⏸️ Jugadores sin actividad esta sesión: {', '.join(inactivos)}.")
+
+    # ── ALERTAS Y PREDICCIONES POR JUGADOR ─────────────────────────────────
+    for row in tabla:
+        jugador = row['jugador']
+        rango = row['rango']
+        ganado = row['ganado_sesion']
+        dif_siguiente = row['diferencia_siguiente']
+        puntos_actuales = row['actual']
+
+        # Peligro de perder posición ante el de abajo
+        if rango < total_jugadores:
+            jugador_abajo = tabla[rango]  # rango es 1-based, índice es rango
+            ganado_abajo = jugador_abajo['ganado_sesion']
+            diferencia_actual = puntos_actuales - jugador_abajo['actual']
+
+            if diferencia_actual > 0:
+                if ganado == 0 and ganado_abajo > 0:
+                    sesiones = diferencia_actual / ganado_abajo
+                    if sesiones < 6:
+                        alertas.append({
+                            'tipo': 'peligro',
+                            'mensaje': f"⚠️ {jugador} (#{rango}) está en peligro: estuvo inactivo y "
+                                       f"{jugador_abajo['jugador']} (#{rango+1}) lo alcanzaría en ~{sesiones:.0f} sesión(es)."
+                        })
+                elif ganado > 0 and ganado_abajo > ganado:
+                    ritmo_diff = ganado_abajo - ganado
+                    sesiones = diferencia_actual / ritmo_diff
+                    if sesiones < 8:
+                        alertas.append({
+                            'tipo': 'peligro',
+                            'mensaje': f"⚠️ {jugador} (#{rango}) pierde terreno: {jugador_abajo['jugador']} "
+                                       f"gana {ritmo_diff:,} pts/sesión más y lo alcanzaría en ~{sesiones:.0f} sesión(es)."
+                        })
+
+        # Potencial de subir posición
+        if rango > 1 and ganado > 0 and dif_siguiente > 0:
+            jugador_arriba = tabla[rango - 2]
+            ganado_arriba = jugador_arriba['ganado_sesion']
+            ventaja_ritmo = ganado - ganado_arriba
+            if ventaja_ritmo > 0:
+                sesiones = dif_siguiente / ventaja_ritmo
+                if sesiones <= 12:
+                    predicciones.append({
+                        'tipo': 'overtake',
+                        'mensaje': f"🚀 {jugador} (#{rango}) podría superar a {jugador_arriba['jugador']} "
+                                   f"(#{rango-1}) en ~{sesiones:.0f} sesión(es) si mantiene el ritmo."
+                    })
+
+        # Inactivo con ventaja pequeña sobre el de abajo
+        if ganado == 0 and rango > 1 and max_ganado > 0 and dif_siguiente < max_ganado * 0.6:
+            alertas.append({
+                'tipo': 'advertencia',
+                'mensaje': f"😴 {jugador} (#{rango}) estuvo inactivo y su ventaja sobre el siguiente "
+                           f"es solo de {dif_siguiente:,} pts — vulnerable si sigue sin farmar."
+            })
+
+    # Amenaza al liderazgo
+    lider = tabla[0]
+    if lider['ganado_sesion'] == 0 and activos:
+        for activo in sorted(activos, key=lambda x: -x['ganado_sesion']):
+            if activo['rango'] > 1 and activo['distancia_lider'] > 0:
+                sesiones = activo['distancia_lider'] / activo['ganado_sesion']
+                if sesiones <= 15:
+                    predicciones.append({
+                        'tipo': 'liderazgo',
+                        'mensaje': f"👑 Si el líder sigue inactivo, {activo['jugador']} "
+                                   f"(#{activo['rango']}) podría tomar el liderazgo en ~{sesiones:.0f} sesión(es)."
+                    })
+                    break
+
+    return {
+        'conclusiones': conclusiones,
+        'alertas': alertas[:6],
+        'predicciones': predicciones[:6]
     }
 
 
@@ -254,7 +380,8 @@ def subir_imagen():
         datos_anterior = datos_almacenados['anterior']
         
         analisis = analizar_comparativa(datos_anterior, datos_actual)
-        
+        analisis['ia'] = generar_analisis_ia(analisis)
+
         # Guardar en historial
         datos_almacenados['historial'].append({
             'fecha': datetime.now().strftime('%Y-%m-%d %H:%M'),
@@ -629,6 +756,45 @@ HTML_TEMPLATE = '''
                 grid-template-columns: 1fr;
             }
         }
+
+        /* ── Panel IA ─────────────────────────────────────────────────────── */
+        .ia-panel {
+            background: linear-gradient(135deg, rgba(138,43,226,0.15), rgba(75,0,130,0.1));
+            border: 1px solid rgba(138,43,226,0.4);
+            border-radius: 15px;
+            padding: 25px;
+            margin-top: 30px;
+        }
+
+        .ia-grid {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(280px, 1fr));
+            gap: 15px;
+            margin-top: 15px;
+        }
+
+        .ia-col-title {
+            font-size: 1em;
+            font-weight: bold;
+            margin-bottom: 10px;
+            padding-bottom: 6px;
+            border-bottom: 1px solid rgba(255,255,255,0.15);
+        }
+
+        .ia-item {
+            background: rgba(255,255,255,0.06);
+            border-radius: 10px;
+            padding: 12px 15px;
+            font-size: 0.92em;
+            line-height: 1.5;
+            margin-bottom: 8px;
+        }
+
+        .ia-item.peligro  { border-left: 3px solid #ff4757; }
+        .ia-item.advertencia { border-left: 3px solid #ffc107; }
+        .ia-item.overtake { border-left: 3px solid #00ff88; }
+        .ia-item.liderazgo { border-left: 3px solid #ffd700; }
+        .ia-item.general  { border-left: 3px solid #00d4ff; }
     </style>
 </head>
 <body>
@@ -690,6 +856,7 @@ HTML_TEMPLATE = '''
                         <th>Ganados (Sesión)</th>
                         <th>Déficit vs. Máximo</th>
                         <th>Dist. al Líder</th>
+                        <th>Dif. al Siguiente</th>
                         <th>Estado</th>
                     </tr>
                 </thead>
@@ -698,6 +865,24 @@ HTML_TEMPLATE = '''
             
             <h2 class="section-title" id="inactive-title" style="display:none;">⏸️ Sin Actividad</h2>
             <div id="inactive-list"></div>
+
+            <h2 class="section-title">🤖 Análisis IA</h2>
+            <div class="ia-panel" id="ia-panel">
+                <div class="ia-grid">
+                    <div>
+                        <div class="ia-col-title">💡 Conclusiones</div>
+                        <div id="ia-conclusiones"></div>
+                    </div>
+                    <div>
+                        <div class="ia-col-title">🚨 Alertas de posición</div>
+                        <div id="ia-alertas"></div>
+                    </div>
+                    <div>
+                        <div class="ia-col-title">🔮 Predicciones</div>
+                        <div id="ia-predicciones"></div>
+                    </div>
+                </div>
+            </div>
         </div>
     </div>
     
@@ -883,6 +1068,9 @@ HTML_TEMPLATE = '''
                     <td class="${row.distancia_lider > 0 ? 'negative' : 'positive'}">
                         ${row.distancia_lider > 0 ? '-' : ''}${formatNumber(row.distancia_lider)}
                     </td>
+                    <td class="${row.diferencia_siguiente > 0 ? 'negative' : 'neutral'}">
+                        ${row.diferencia_siguiente > 0 ? '-' + formatNumber(row.diferencia_siguiente) : '👑'}
+                    </td>
                     <td>
                         <span class="badge ${row.estado === 'activo' ? 'badge-active' : 'badge-inactive'}">
                             ${row.estado === 'activo' ? '📈 Activo' : '⏸️ Inactivo'}
@@ -904,6 +1092,26 @@ HTML_TEMPLATE = '''
             // Actualizar estado para próxima comparación
             statusText.innerHTML = '✅ ¡Análisis completado! Pega o sube otra imagen para comparar con esta sesión';
             statusBox.className = 'status-box success';
+
+            // ── Análisis IA ─────────────────────────────────────────────────
+            if (analisis.ia) {
+                const ia = analisis.ia;
+
+                document.getElementById('ia-conclusiones').innerHTML =
+                    (ia.conclusiones.length
+                        ? ia.conclusiones.map(c => `<div class="ia-item general">${c}</div>`).join('')
+                        : '<div class="ia-item general">Sin datos suficientes.</div>');
+
+                document.getElementById('ia-alertas').innerHTML =
+                    (ia.alertas.length
+                        ? ia.alertas.map(a => `<div class="ia-item ${a.tipo}">${a.mensaje}</div>`).join('')
+                        : '<div class="ia-item general">✅ Sin alertas críticas esta sesión.</div>');
+
+                document.getElementById('ia-predicciones').innerHTML =
+                    (ia.predicciones.length
+                        ? ia.predicciones.map(p => `<div class="ia-item ${p.tipo}">${p.mensaje}</div>`).join('')
+                        : '<div class="ia-item general">🔮 Sin cambios de posición previstos a corto plazo.</div>');
+            }
         }
         
         function formatNumber(num) {
@@ -947,5 +1155,5 @@ if __name__ == '__main__':
     print("="*60 + "\n")
     
     import os
-    port = int(os.environ.get('PORT', 5000))
+    port = int(os.environ.get('PORT', 5001))
     app.run(debug=False, host='0.0.0.0', port=port)

@@ -1,1 +1,1 @@
-web: gunicorn app_lite:app --bind "0.0.0.0:${PORT:-8080}"
+web: gunicorn app_web:app --bind "0.0.0.0:${PORT:-8080}" --timeout 120 --workers 1
