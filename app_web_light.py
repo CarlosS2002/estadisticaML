@@ -33,19 +33,35 @@ def _limpiar_numero(numero_texto):
 
 def _corregir_puntaje_pegado_con_rango(puntaje, rango):
     """Corrige casos OCR donde junta rango+puntaje (ej: 5 + 36897354 => 536897354)."""
-    if rango is None:
+    texto = str(puntaje)
+
+    def _es_puntaje_plausible(valor_txt):
+        if not valor_txt or not valor_txt.isdigit():
+            return False
+        # En este tablero los puntajes reales están en millones (7-8 dígitos).
+        return len(valor_txt) in (7, 8) and 1_000_000 <= int(valor_txt) <= 99_999_999
+
+    # Si ya es plausible, no tocar.
+    if _es_puntaje_plausible(texto):
         return puntaje
 
-    texto = str(puntaje)
-    rango_txt = str(rango)
+    candidatos = []
 
-    # Si empieza con el rango y queda un puntaje valido de 7-8 digitos, usar el recorte.
-    if len(texto) >= 8 and texto.startswith(rango_txt):
-        recortado = texto[len(rango_txt):]
-        if len(recortado) in (7, 8):
-            valor = int(recortado)
-            if 100000 <= valor <= 99999999:
-                return valor
+    # Caso guiado por rango OCR detectado.
+    if rango is not None:
+        rango_txt = str(rango)
+        if texto.startswith(rango_txt):
+            candidatos.append(texto[len(rango_txt):])
+
+    # Casos sin rango confiable: recortar 1 o 2 dígitos de prefijo espurio.
+    if len(texto) >= 9:
+        candidatos.append(texto[1:])
+    if len(texto) >= 10:
+        candidatos.append(texto[2:])
+
+    for cand in candidatos:
+        if _es_puntaje_plausible(cand):
+            return int(cand)
 
     return puntaje
 
