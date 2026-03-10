@@ -358,19 +358,34 @@ def generar_analisis_ia(analisis):
     max_ganado = resumen['max_ganado']
     total_jugadores = len(tabla)
     activos = [r for r in tabla if r['estado'] == 'activo']
-    inactivos = [r['jugador'] for r in tabla if r['estado'] == 'inactivo']
+    inactivos = [r for r in tabla if r['estado'] == 'inactivo']
 
+    # ── Conclusiones generales ──
     pct_activos = len(activos) / total_jugadores * 100
     if pct_activos >= 80:
-        conclusiones.append(f"💪 Sesión muy activa: {len(activos)}/{total_jugadores} jugadores ({pct_activos:.0f}%).")
+        conclusiones.append(f"💪 Sesión muy activa: {len(activos)} de {total_jugadores} jugadores farmaron puntos ({pct_activos:.0f}% participación).")
     elif pct_activos >= 50:
-        conclusiones.append(f"⚡ Sesión moderada: {len(activos)}/{total_jugadores} activos ({pct_activos:.0f}%).")
+        conclusiones.append(f"⚡ Sesión moderada: {len(activos)} de {total_jugadores} jugadores fueron activos ({pct_activos:.0f}%).")
     else:
-        conclusiones.append(f"😴 Sesión baja: solo {len(activos)}/{total_jugadores} activos.")
+        conclusiones.append(f"😴 Sesión baja: solo {len(activos)} de {total_jugadores} jugadores activos. Alta inactividad general.")
 
-    if inactivos:
-        conclusiones.append(f"⏸️ Sin actividad: {', '.join(inactivos)}.")
+    if activos and len(activos) > 1:
+        max_act = max(activos, key=lambda x: x['ganado_sesion'])
+        min_act = min(activos, key=lambda x: x['ganado_sesion'])
+        brecha = max_act['ganado_sesion'] - min_act['ganado_sesion']
+        if max_ganado > 0 and brecha > max_ganado * 0.4:
+            conclusiones.append(
+                f"📊 Gran disparidad: {max_act['jugador']} ganó {max_act['ganado_sesion']:,} pts "
+                f"vs {min_act['jugador']} con {min_act['ganado_sesion']:,} pts."
+            )
+        else:
+            conclusiones.append("📈 Rendimiento parejo entre los jugadores activos esta sesión.")
 
+    nombres_inactivos = [r['jugador'] for r in inactivos]
+    if nombres_inactivos:
+        conclusiones.append(f"⏸️ Sin actividad esta sesión: {', '.join(nombres_inactivos)}.")
+
+    # ── Alertas y predicciones por jugador ──
     for row in tabla:
         jugador = row['jugador']
         rango = row['rango']
@@ -378,29 +393,66 @@ def generar_analisis_ia(analisis):
         dif_siguiente = row['diferencia_siguiente']
         puntos_actuales = row['actual']
 
+        # Peligro de perder posición ante el de abajo
         if rango < total_jugadores:
             jugador_abajo = tabla[rango]
             ganado_abajo = jugador_abajo['ganado_sesion']
             diferencia_actual = puntos_actuales - jugador_abajo['actual']
 
-            if diferencia_actual > 0 and ganado == 0 and ganado_abajo > 0:
-                sesiones = diferencia_actual / ganado_abajo
-                if sesiones < 6:
-                    alertas.append({
-                        'tipo': 'peligro',
-                        'mensaje': f"⚠️ {jugador} (#{rango}) en peligro: {jugador_abajo['jugador']} lo alcanza en ~{sesiones:.0f} sesión(es)."
-                    })
+            if diferencia_actual > 0:
+                if ganado == 0 and ganado_abajo > 0:
+                    sesiones = diferencia_actual / ganado_abajo
+                    if sesiones < 6:
+                        alertas.append({
+                            'tipo': 'peligro',
+                            'mensaje': f"⚠️ {jugador} (#{rango}) está en peligro: estuvo inactivo y "
+                                       f"{jugador_abajo['jugador']} (#{rango+1}) lo alcanzaría en ~{sesiones:.0f} sesión(es)."
+                        })
+                elif ganado > 0 and ganado_abajo > ganado:
+                    ritmo_diff = ganado_abajo - ganado
+                    sesiones = diferencia_actual / ritmo_diff
+                    if sesiones < 8:
+                        alertas.append({
+                            'tipo': 'peligro',
+                            'mensaje': f"⚠️ {jugador} (#{rango}) pierde terreno: {jugador_abajo['jugador']} "
+                                       f"gana {ritmo_diff:,} pts/sesión más y lo alcanzaría en ~{sesiones:.0f} sesión(es)."
+                        })
 
+        # Potencial de subir posición
         if rango > 1 and ganado > 0 and dif_siguiente > 0:
             jugador_arriba = tabla[rango - 2]
-            ventaja_ritmo = ganado - jugador_arriba['ganado_sesion']
+            ganado_arriba = jugador_arriba['ganado_sesion']
+            ventaja_ritmo = ganado - ganado_arriba
             if ventaja_ritmo > 0:
                 sesiones = dif_siguiente / ventaja_ritmo
                 if sesiones <= 12:
                     predicciones.append({
                         'tipo': 'overtake',
-                        'mensaje': f"🚀 {jugador} (#{rango}) puede superar a {jugador_arriba['jugador']} en ~{sesiones:.0f} sesión(es)."
+                        'mensaje': f"🚀 {jugador} (#{rango}) podría superar a {jugador_arriba['jugador']} "
+                                   f"(#{rango-1}) en ~{sesiones:.0f} sesión(es) si mantiene el ritmo."
                     })
+
+        # Inactivo con ventaja pequeña
+        if ganado == 0 and rango > 1 and max_ganado > 0 and dif_siguiente < max_ganado * 0.6:
+            alertas.append({
+                'tipo': 'advertencia',
+                'mensaje': f"😴 {jugador} (#{rango}) estuvo inactivo y su ventaja sobre el siguiente "
+                           f"es solo de {dif_siguiente:,} pts — vulnerable si sigue sin farmar."
+            })
+
+    # Amenaza al liderazgo
+    lider = tabla[0]
+    if lider['ganado_sesion'] == 0 and activos:
+        for activo in sorted(activos, key=lambda x: -x['ganado_sesion']):
+            if activo['rango'] > 1 and activo['distancia_lider'] > 0:
+                sesiones = activo['distancia_lider'] / activo['ganado_sesion']
+                if sesiones <= 15:
+                    predicciones.append({
+                        'tipo': 'liderazgo',
+                        'mensaje': f"👑 Si el líder sigue inactivo, {activo['jugador']} "
+                                   f"(#{activo['rango']}) podría tomar el liderazgo en ~{sesiones:.0f} sesión(es)."
+                    })
+                    break
 
     return {
         'conclusiones': conclusiones,
