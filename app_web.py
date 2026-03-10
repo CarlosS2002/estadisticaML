@@ -6,26 +6,43 @@ Sube imágenes y obtén análisis visual comparativo
 from flask import Flask, render_template, request, jsonify, session
 import re
 import os
-import base64
 from io import BytesIO
 from datetime import datetime
 
-try:
-    from PIL import Image
-    import easyocr
-except ImportError:
-    import subprocess
-    import sys
-    subprocess.check_call([sys.executable, "-m", "pip", "install", "pillow", "easyocr", "flask"])
-    from PIL import Image
-    import easyocr
+from PIL import Image
 
 app = Flask(__name__)
 app.secret_key = 'mineria_analyzer_2024'
 
-print("🔄 Iniciando motor OCR (solo inglés, optimizado para Railway)...")
-reader = easyocr.Reader(['en'], gpu=False, verbose=False)
-print("✅ Motor OCR listo!")
+reader = None
+ocr_status = {
+    'ok': False,
+    'error': None
+}
+
+
+def inicializar_ocr():
+    """Inicializa OCR bajo demanda para evitar caídas al boot en PaaS."""
+    global reader
+
+    if reader is not None:
+        return True
+
+    if ocr_status['error'] is not None:
+        return False
+
+    try:
+        print("🔄 Iniciando motor OCR (lazy init)...")
+        import easyocr
+        reader = easyocr.Reader(['en'], gpu=False, verbose=False)
+        ocr_status['ok'] = True
+        print("✅ Motor OCR listo!")
+        return True
+    except Exception as e:
+        ocr_status['ok'] = False
+        ocr_status['error'] = str(e)
+        print(f"❌ OCR no disponible: {e}")
+        return False
 
 # Almacén de datos de sesiones
 datos_almacenados = {
@@ -40,6 +57,14 @@ def extraer_datos_imagen(imagen_bytes):
     Simplificado para evitar errores de OCR con nombres
     """
     try:
+        if not inicializar_ocr():
+            return {
+                'datos': {},
+                'textos': [],
+                'exito': False,
+                'error': f"OCR no disponible en el servidor: {ocr_status['error']}"
+            }
+
         # Guardar imagen temporalmente
         imagen = Image.open(BytesIO(imagen_bytes))
         if imagen.mode == 'RGBA':

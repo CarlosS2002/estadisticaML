@@ -342,6 +342,45 @@
                 grid-template-columns: 1fr;
             }
         }
+
+        /* ── Panel IA ─────────────────────────────────────────────────────── */
+        .ia-panel {
+            background: linear-gradient(135deg, rgba(138,43,226,0.15), rgba(75,0,130,0.1));
+            border: 1px solid rgba(138,43,226,0.4);
+            border-radius: 15px;
+            padding: 25px;
+            margin-top: 30px;
+        }
+
+        .ia-grid {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(280px, 1fr));
+            gap: 15px;
+            margin-top: 15px;
+        }
+
+        .ia-col-title {
+            font-size: 1em;
+            font-weight: bold;
+            margin-bottom: 10px;
+            padding-bottom: 6px;
+            border-bottom: 1px solid rgba(255,255,255,0.15);
+        }
+
+        .ia-item {
+            background: rgba(255,255,255,0.06);
+            border-radius: 10px;
+            padding: 12px 15px;
+            font-size: 0.92em;
+            line-height: 1.5;
+            margin-bottom: 8px;
+        }
+
+        .ia-item.peligro  { border-left: 3px solid #ff4757; }
+        .ia-item.advertencia { border-left: 3px solid #ffc107; }
+        .ia-item.overtake { border-left: 3px solid #00ff88; }
+        .ia-item.liderazgo { border-left: 3px solid #ffd700; }
+        .ia-item.general  { border-left: 3px solid #00d4ff; }
     </style>
 </head>
 <body>
@@ -412,6 +451,24 @@
             
             <h2 class="section-title" id="inactive-title" style="display:none;">⏸️ Sin Actividad</h2>
             <div id="inactive-list"></div>
+
+            <h2 class="section-title">🤖 Análisis IA</h2>
+            <div class="ia-panel" id="ia-panel">
+                <div class="ia-grid">
+                    <div>
+                        <div class="ia-col-title">💡 Conclusiones</div>
+                        <div id="ia-conclusiones"></div>
+                    </div>
+                    <div>
+                        <div class="ia-col-title">🚨 Alertas de posición</div>
+                        <div id="ia-alertas"></div>
+                    </div>
+                    <div>
+                        <div class="ia-col-title">🔮 Predicciones</div>
+                        <div id="ia-predicciones"></div>
+                    </div>
+                </div>
+            </div>
         </div>
     </div>
     
@@ -621,6 +678,26 @@
             // Actualizar estado para próxima comparación
             statusText.innerHTML = '✅ ¡Análisis completado! Pega o sube otra imagen para comparar con esta sesión';
             statusBox.className = 'status-box success';
+
+            // ── Análisis IA ─────────────────────────────────────────────────
+            if (analisis.ia) {
+                const ia = analisis.ia;
+
+                document.getElementById('ia-conclusiones').innerHTML =
+                    (ia.conclusiones.length
+                        ? ia.conclusiones.map(c => `<div class="ia-item general">${c}</div>`).join('')
+                        : '<div class="ia-item general">Sin datos suficientes.</div>');
+
+                document.getElementById('ia-alertas').innerHTML =
+                    (ia.alertas.length
+                        ? ia.alertas.map(a => `<div class="ia-item ${a.tipo}">${a.mensaje}</div>`).join('')
+                        : '<div class="ia-item general">✅ Sin alertas críticas esta sesión.</div>');
+
+                document.getElementById('ia-predicciones').innerHTML =
+                    (ia.predicciones.length
+                        ? ia.predicciones.map(p => `<div class="ia-item ${p.tipo}">${p.mensaje}</div>`).join('')
+                        : '<div class="ia-item general">🔮 Sin cambios de posición previstos a corto plazo.</div>');
+            }
         }
         
         function formatNumber(num) {
